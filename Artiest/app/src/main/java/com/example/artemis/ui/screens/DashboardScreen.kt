@@ -86,6 +86,65 @@ fun DashboardScreen(
     var pairingCode by remember { mutableStateOf<String?>(null) }
     var connectedClients by remember { mutableIntStateOf(0) }
     var isRefreshingCode by remember { mutableStateOf(false) }
+    var serverIpAddress by remember { mutableStateOf<String?>(null) }
+
+    // Port used by the Artemis server
+    val SERVER_PORT = 8443
+
+    // ---- fetch pairing code from server ----
+    fun fetchPairingCode() {
+        scope.launch {
+            isRefreshingCode = true
+            try {
+                val url = java.net.URL("http://127.0.0.1:$SERVER_PORT/api/v1/auth/pairing-code")
+                val conn = url.openConnection() as java.net.HttpURLConnection
+                conn.connectTimeout = 3000
+                conn.readTimeout = 3000
+                conn.requestMethod = "POST"
+                conn.doOutput = false
+                val responseCode = conn.responseCode
+                if (responseCode == 200) {
+                    val body = conn.inputStream.bufferedReader().readText()
+                    val json = org.json.JSONObject(body)
+                    pairingCode = json.getString("code")
+                } else {
+                    android.util.Log.e("Dashboard", "Failed to fetch pairing code: HTTP $responseCode")
+                    // Fall back to local generation if server not running
+                    pairingCode = String.format("%06d", java.security.SecureRandom().nextInt(1_000_000))
+                }
+                conn.disconnect()
+            } catch (e: Exception) {
+                android.util.Log.w("Dashboard", "Could not fetch pairing code from server: ${e.message}")
+                // Fall back to local generation if server not running
+                pairingCode = String.format("%06d", java.security.SecureRandom().nextInt(1_000_000))
+            }
+            isRefreshingCode = false
+        }
+    }
+
+    // ---- fetch pairing code from server on launch ----
+    LaunchedEffect(Unit) {
+        // Get local IP for display
+        try {
+            val wifiManager = context.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
+            val ipInt = wifiManager.connectionInfo.ipAddress
+            serverIpAddress = String.format("%d.%d.%d.%d", ipInt and 0xFF, (ipInt shr 8) and 0xFF, (ipInt shr 16) and 0xFF, (ipInt shr 24) and 0xFF)
+        } catch (_: Exception) {
+            serverIpAddress = "192.168.x.x"
+        }
+        // Fetch pairing code from server
+        fetchPairingCode()
+        // Auto-start the server
+        if (!isServiceRunning) {
+            val intent = Intent(context, ArtemisSentinelService::class.java)
+            try {
+                context.startForegroundService(intent)
+                isServiceRunning = true
+            } catch (e: Exception) {
+                android.util.Log.e("Dashboard", "Auto-start failed: ${e.message}")
+            }
+        }
+    }
 
     // ---- periodic poll of connected clients while service is running ----
     LaunchedEffect(isServiceRunning) {
@@ -152,14 +211,8 @@ fun DashboardScreen(
             item(key = "pairing") {
                 PairingCodeCard(
                     pairingCode = pairingCode,
-                    onRefresh = {
-                        isRefreshingCode = true
-                        scope.launch {
-                            val code = String.format("%06d", java.security.SecureRandom().nextInt(1_000_000))
-                            pairingCode = code
-                            isRefreshingCode = false
-                        }
-                    },
+                    serverIp = serverIpAddress,
+                    onRefresh = { fetchPairingCode() },
                     isRefreshing = isRefreshingCode
                 )
             }
@@ -247,6 +300,7 @@ private fun StatusCard(isRunning: Boolean) {
 @Composable
 private fun PairingCodeCard(
     pairingCode: String?,
+    serverIp: String?,
     onRefresh: () -> Unit,
     isRefreshing: Boolean
 ) {
@@ -325,6 +379,14 @@ private fun PairingCodeCard(
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            if (serverIp != null) {
+                Text(
+                    text = "Server: http://$serverIp:8443",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontFamily = FontFamily.Monospace
+                )
+            }
         }
     }
 }

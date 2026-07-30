@@ -24,10 +24,6 @@ class ArtemisApp : Application() {
     override fun onCreate() {
         super.onCreate()
         instance = this
-        // Set Netty system properties early to avoid NIO selector reflection issues on Android
-        System.setProperty("io.netty.noKeySetOptimization", "true")
-        System.setProperty("io.netty.noUnsafe", "true")
-        android.util.Log.i("ArtemisApp", "Netty properties set early")
         initSecurity()
         createNotificationChannels()
     }

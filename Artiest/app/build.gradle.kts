@@ -44,9 +44,6 @@ android {
             excludes += "/META-INF/LICENSE.md"
             excludes += "**/kotlin/**"
             excludes += "/META-INF/INDEX.LIST"
-            excludes += "/META-INF/*.kotlin_module"
-            pickFirsts += "/META-INF/io.netty.versions.properties"
-            pickFirsts += "/META-INF/native-image/**"
         }
     }
 }
@@ -74,16 +71,6 @@ dependencies {
 
     // DataStore
     implementation(libs.androidx.datastore.preferences)
-
-    // Ktor Server (Netty engine for broad compat)
-    implementation(libs.ktor.server.core)
-    implementation(libs.ktor.server.netty)
-    implementation(libs.ktor.server.websockets)
-    implementation(libs.ktor.server.content.negotiation)
-    implementation(libs.ktor.server.auth)
-    implementation(libs.ktor.server.cors)
-    implementation(libs.ktor.server.status.pages)
-    implementation(libs.ktor.serialization.json)
 
     // Kotlinx
     implementation(libs.kotlinx.coroutines.android)

@@ -142,8 +142,8 @@ def _create_ssl_context():
 
 
 def api_request(host, path, method="GET", data=None, token=None, port=DEFAULT_PORT):
-    """Make HTTPS request to Artemis server."""
-    url = f"https://{host}:{port}{path}"
+    """Make HTTP request to Artemis server."""
+    url = f"http://{host}:{port}{path}"
     
     headers = {
         "Content-Type": "application/json",
@@ -348,7 +348,7 @@ def cmd_camera(args):
         # Optionally download
         if args.download:
             print(f"  Downloading...")
-            photo_url = f"https://{args.host}:{port}{result.get('url', '')}"
+            photo_url = f"http://{args.host}:{port}{result.get('url', '')}"
             try:
                 ctx = _create_ssl_context()
                 with urllib.request.urlopen(photo_url, context=ctx) as resp:

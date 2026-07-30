@@ -65,7 +65,7 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.Artemis"
-        android:usesCleartextTraffic="false"
+        android:usesCleartextTraffic="true"
         tools:targetApi="37">
 
         <!-- Main Activity -->
@@ -84,7 +84,7 @@
         <!-- Foreground Service -->
         <service
             android:name=".service.ArtemisSentinelService"
-            android:exported="false"
+            android:exported="true"
             android:foregroundServiceType="dataSync|camera|microphone|location|mediaPlayback|connectedDevice"
             android:stopWithTask="false" />
 

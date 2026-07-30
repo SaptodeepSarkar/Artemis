@@ -19,7 +19,7 @@ import com.example.artemis.feature.CameraController
 import com.example.artemis.feature.DeviceInfoProvider
 import com.example.artemis.feature.LocationTracker
 import com.example.artemis.feature.MicController
-import com.example.artemis.server.ArtemisServer
+import com.example.artemis.server.SimpleHttpServer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -37,7 +37,7 @@ class ArtemisSentinelService : Service() {
     private lateinit var locationTracker: LocationTracker
     private lateinit var cameraController: CameraController
     private lateinit var micController: MicController
-    private lateinit var artemisServer: ArtemisServer
+    private lateinit var artemisServer: SimpleHttpServer
 
     private var wakeLock: PowerManager.WakeLock? = null
     private var isRunning = false
@@ -100,7 +100,7 @@ class ArtemisSentinelService : Service() {
         startForeground(NOTIFICATION_ID, createNotification(0))
         acquireWakeLock()
 
-        artemisServer = ArtemisServer(
+        artemisServer = SimpleHttpServer(
             app = app,
             authManager = authManager,
             deviceInfoProvider = deviceInfoProvider,

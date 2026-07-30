@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Artemis Sentinel</string>
+    <string name="service_name">Artemis Sentinel</string>
+    <string name="service_description">Secure device monitoring server running</string>
+    <string name="channel_name">Artemis Sentinel Service</string>
+    <string name="channel_description">Artemis server status notifications</string>
+    <string name="accessibility_service_desc">Allows remote control of the device screen</string>
+    <string name="permission_rationale_location">Location access is needed to track device location every 10 minutes</string>
+    <string name="permission_rationale_background_location">Background location is needed for periodic tracking when the app is in the background</string>
+    <string name="permission_rationale_camera">Camera access is needed for remote capture requests</string>
+    <string name="permission_rationale_mic">Microphone access is needed for remote audio recording</string>
+    <string name="permission_rationale_notifications">Notifications show the server status</string>
+    <string name="permission_rationale_contacts">Contacts access needed for remote contact queries</string>
+    <string name="permission_rationale_sms">SMS access needed for remote SMS queries</string>
+    <string name="pairing_code_label">Pairing Code</string>
+    <string name="server_status_running">Server Running</string>
+    <string name="server_status_stopped">Server Stopped</string>
+    <string name="btn_start_server">Start Server</string>
+    <string name="btn_stop_server">Stop Server</string>
+    <string name="btn_grant_permissions">Grant All Permissions</string>
+    <string name="status_connected_clients">Connected Clients: %d</string>
+    <string name="status_device_ip">IP: %s</string>
+    <string name="status_device_port">Port: %d</string>
+</resources>

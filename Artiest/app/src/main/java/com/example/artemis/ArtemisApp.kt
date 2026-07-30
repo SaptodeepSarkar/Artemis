@@ -8,6 +8,7 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import com.example.artemis.auth.PairingCode
 import java.security.KeyStore
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -20,6 +21,10 @@ class ArtemisApp : Application() {
         private set
     lateinit var encryptedPreferences: EncryptedSharedPreferences
         private set
+
+    // Shared state for pairing code — readable from UI, writable from server
+    @Volatile
+    var currentPairingCode: PairingCode? = null
 
     override fun onCreate() {
         super.onCreate()

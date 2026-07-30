@@ -155,12 +155,15 @@ class SimpleHttpServer(
         router.get("/api/v1/health") { healthHandler(it) }
         router.get("/health") { healthHandler(it) }
 
-        // Pairing code
-        router.get("/api/v1/auth/pairing-code") { getPairingCodeHandler(it) }
-        router.post("/api/v1/auth/pairing-code") { getPairingCodeHandler(it) }
+        // NOTE: No public pairing-code endpoint. Code is generated internally
+        // and shown on the phone screen via ArtemisApp.instance.currentPairingCode.
+        // The user reads it from the screen and enters it on the dashboard.
 
         // Pair
         router.post("/api/v1/auth/pair") { pairHandler(it) }
+
+        // Regenerate pairing code (called by phone UI, no auth — localhost only)
+        router.post("/api/v1/auth/pair/regenerate") { regenerateCodeHandler(it) }
 
         // Token refresh
         router.post("/api/v1/auth/token") { tokenRefreshHandler(it) }
@@ -231,16 +234,12 @@ class SimpleHttpServer(
         ))
     }
 
-    private fun getPairingCodeHandler(req: HttpRequest): HttpResponse {
-        // Only generate a new code if none exists or current one is expired
-        if (pairingCode == null || System.currentTimeMillis() > pairingCode!!.expiresAt) {
-            val code = authManager.generatePairingCode()
-            pairingCode = code
-        }
-        Log.i("ArtemisServer", "Pairing code served: ${pairingCode!!.code} (expires: ${pairingCode!!.expiresAt})")
+    private fun regenerateCodeHandler(req: HttpRequest): HttpResponse {
+        val newCode = regeneratePairingCode()
+        Log.i("ArtemisServer", "Pairing code regenerated via API: $newCode")
         return jsonResponse(200, mapOf(
-            "code" to pairingCode!!.code,
-            "expiresAt" to pairingCode!!.expiresAt
+            "code" to newCode,
+            "expiresAt" to (app.currentPairingCode?.expiresAt ?: System.currentTimeMillis() + 300_000)
         ))
     }
 
@@ -510,6 +509,18 @@ class SimpleHttpServer(
     // Server lifecycle
     // ============================================================
 
+    /**
+     * Called by the UI (via service) to get a fresh pairing code.
+     * Returns the new 6-digit code string.
+     */
+    fun regeneratePairingCode(): String {
+        val code = authManager.generatePairingCode()
+        pairingCode = code
+        app.currentPairingCode = code
+        Log.i("ArtemisServer", "Pairing code regenerated: ${code.code}")
+        return code.code
+    }
+
     suspend fun start() {
         if (serverSocket != null) {
             Log.i("ArtemisServer", "start() called but server already running")
@@ -523,8 +534,9 @@ class SimpleHttpServer(
             serverSocket = ServerSocket(port)
             Log.i("ArtemisServer", "ServerSocket bound to 0.0.0.0:$port")
 
-            // Generate initial pairing code
+            // Generate initial pairing code and publish to shared state
             pairingCode = authManager.generatePairingCode()
+            app.currentPairingCode = pairingCode
             Log.i("ArtemisServer", "Initial pairing code: ${pairingCode?.code}")
 
             serverScope.launch {
@@ -696,20 +708,18 @@ class SimpleHttpServer(
             }
 
             val headerLines = StringBuilder()
-            headerLines.appendLine("HTTP/1.1 ${response.statusCode} $statusText")
-            headerLines.appendLine("Content-Type: ${response.contentType}; charset=utf-8")
-            headerLines.appendLine("Content-Length: ${bodyBytes.size}")
-            headerLines.appendLine("Connection: close")
-            // CORS headers
-            headerLines.appendLine("Access-Control-Allow-Origin: *")
-            headerLines.appendLine("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS")
-            headerLines.appendLine("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With")
-            // Custom headers
+            headerLines.append("HTTP/1.1 ${response.statusCode} $statusText\r\n")
+            headerLines.append("Content-Type: ${response.contentType}; charset=utf-8\r\n")
+            headerLines.append("Content-Length: ${bodyBytes.size}\r\n")
+            headerLines.append("Connection: close\r\n")
+            headerLines.append("Access-Control-Allow-Origin: *\r\n")
+            headerLines.append("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n")
+            headerLines.append("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With\r\n")
             for ((key, value) in response.headers) {
-                headerLines.appendLine("$key: $value")
+                headerLines.append("$key: $value\r\n")
             }
-            headerLines.appendLine("Server: Artemis/1.0.0")
-            headerLines.appendLine("")
+            headerLines.append("Server: Artemis/1.0.0\r\n")
+            headerLines.append("\r\n")
 
             output.write(headerLines.toString().toByteArray(Charsets.UTF_8))
             output.write(bodyBytes)

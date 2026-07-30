@@ -55,6 +55,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.TextUnitType
 import androidx.compose.ui.unit.dp
+import com.example.artemis.ArtemisApp
 import com.example.artemis.service.ArtemisSentinelService
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -92,31 +93,37 @@ fun DashboardScreen(
     val SERVER_PORT = 8443
 
     // ---- fetch pairing code from server ----
-    fun fetchPairingCode() {
+    fun refreshPairingCode() {
+        // Read from shared in-process state (server exposes code via ArtemisApp)
+        val sharedCode = ArtemisApp.instance.currentPairingCode
+        pairingCode = sharedCode?.code
+        isRefreshingCode = false
+    }
+
+    fun regeneratePairingCode() {
         scope.launch {
             isRefreshingCode = true
             try {
-                val url = java.net.URL("http://127.0.0.1:$SERVER_PORT/api/v1/auth/pairing-code")
+                // Call the server directly via in-process reference
+                val url = java.net.URL("http://127.0.0.1:$SERVER_PORT/api/v1/auth/pair/regenerate")
                 val conn = url.openConnection() as java.net.HttpURLConnection
-                conn.connectTimeout = 3000
-                conn.readTimeout = 3000
+                conn.connectTimeout = 2000
+                conn.readTimeout = 2000
                 conn.requestMethod = "POST"
-                conn.doOutput = false
+                conn.doOutput = true
+                conn.outputStream.write("{}".toByteArray())
                 val responseCode = conn.responseCode
                 if (responseCode == 200) {
                     val body = conn.inputStream.bufferedReader().readText()
                     val json = org.json.JSONObject(body)
                     pairingCode = json.getString("code")
-                } else {
-                    android.util.Log.e("Dashboard", "Failed to fetch pairing code: HTTP $responseCode")
-                    // Fall back to local generation if server not running
-                    pairingCode = String.format("%06d", java.security.SecureRandom().nextInt(1_000_000))
+                    android.util.Log.i("Dashboard", "Pairing code regenerated via server: $pairingCode")
                 }
                 conn.disconnect()
             } catch (e: Exception) {
-                android.util.Log.w("Dashboard", "Could not fetch pairing code from server: ${e.message}")
-                // Fall back to local generation if server not running
-                pairingCode = String.format("%06d", java.security.SecureRandom().nextInt(1_000_000))
+                android.util.Log.w("Dashboard", "Could not regenerate pairing code: ${e.message}")
+                // Fallback: read from shared state
+                pairingCode = ArtemisApp.instance.currentPairingCode?.code
             }
             isRefreshingCode = false
         }
@@ -132,9 +139,7 @@ fun DashboardScreen(
         } catch (_: Exception) {
             serverIpAddress = "192.168.x.x"
         }
-        // Fetch pairing code from server
-        fetchPairingCode()
-        // Auto-start the server
+        // AUTO-START service FIRST, then read pairing code from shared state
         if (!isServiceRunning) {
             val intent = Intent(context, ArtemisSentinelService::class.java)
             try {
@@ -143,6 +148,15 @@ fun DashboardScreen(
             } catch (e: Exception) {
                 android.util.Log.e("Dashboard", "Auto-start failed: ${e.message}")
             }
+        }
+        // Wait for server to be ready
+        delay(3000)
+        // Read code from shared in-process state — no network call
+        pairingCode = ArtemisApp.instance.currentPairingCode?.code
+        if (pairingCode != null) {
+            android.util.Log.i("Dashboard", "Read pairing code from shared state: $pairingCode")
+        } else {
+            android.util.Log.w("Dashboard", "No pairing code in shared state yet")
         }
     }
 
@@ -212,7 +226,7 @@ fun DashboardScreen(
                 PairingCodeCard(
                     pairingCode = pairingCode,
                     serverIp = serverIpAddress,
-                    onRefresh = { fetchPairingCode() },
+                    onRefresh = { regeneratePairingCode() },
                     isRefreshing = isRefreshingCode
                 )
             }

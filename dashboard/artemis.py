@@ -191,22 +191,15 @@ def cmd_pair(args):
     
     print(f"✓ Device reachable: {json.dumps(health, indent=2)}")
     
-    # Step 2: Request pairing code
-    print("Requesting pairing code from device...")
-    code_resp = api_request(host, "/api/v1/auth/pairing-code", method="POST", port=port)
-    
-    if "error" in code_resp:
-        print(f"✗ Failed to get pairing code: {code_resp['error']}")
-        return
-    
-    code = code_resp.get("code", "??????")
-    print(f"\n⚠  PAIRING CODE ON DEVICE SCREEN: {code}")
-    print(f"   Enter this code on the device (or check device screen for it)\n")
-    
+    # Step 2: Get pairing code from user (read from phone screen)
+    print()
+    print("Look at the Artemis app on your phone for the pairing code.")
+    print()
+
     if args.code:
         pairing_code = args.code
     else:
-        pairing_code = input("📱 Enter the pairing code shown on device: ").strip()
+        pairing_code = input("Enter the 6-digit pairing code shown on the phone: ").strip()
     
     # Step 3: Submit pairing code
     print(f"Submitting pairing code...")

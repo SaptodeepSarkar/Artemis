@@ -9,9 +9,13 @@ import com.example.artemis.data.AppDatabase
 
 /**
  * HealthCheckWorker runs periodically via WorkManager to ensure:
- * 1. The foreground service is still running
+ * 1. The foreground service is still running AND its socket is alive
  * 2. Old location data is pruned
  * 3. Expired auth tokens are cleaned up
+ *
+ * Liveness is checked through the shared [ArtemisApp.serverRef] — the
+ * service publishes the running server instance there; a null ref means
+ * the process was killed and never re-armed (START_STICKY failure).
  */
 class HealthCheckWorker(
     context: Context,
@@ -34,17 +38,18 @@ class HealthCheckWorker(
             val prunedCount = database.locationDao().pruneOlderThan(pruneCutoff)
             Log.d(TAG, "Pruned $prunedCount old location records")
 
-            // Check if the foreground service is running
-            val isServerRunning = try {
-                // In a real implementation we'd check via a bound service or shared state
-                true
-            } catch (e: Exception) {
-                false
-            }
+            // Check the server socket is actually alive, not just the ref.
+            val server = app.serverRef
+            val isServerAlive = server != null && runCatching {
+                // The server tracks its own accept-loop health; a dead
+                // socket shows up as a closed serverSocket.
+                server.isRunning && !server.serverSocketClosed
+            }.getOrDefault(false)
 
-            if (!isServerRunning) {
-                Log.w(TAG, "Server not running, restarting...")
-                ArtemisSentinelService.start(applicationContext)
+            if (!isServerAlive) {
+                Log.w(TAG, "Server not running or socket dead, restarting...")
+                runCatching { ArtemisSentinelService.start(applicationContext) }
+                    .onFailure { Log.e(TAG, "Restart failed: ${it.message}") }
             }
 
             Result.success()

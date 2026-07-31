@@ -1,5 +1,6 @@
 package com.example.artemis.ui.screens
 
+import android.content.Context
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -73,10 +74,16 @@ data class PairedDashboard(
 fun SettingsScreen(
     onNavigateBack: () -> Unit
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
     // ---- local state (not persisted in v1) ----
     var serverPort by remember { mutableStateOf("8443") }
     var notificationsEnabled by remember { mutableStateOf(true) }
-    var batteryOptimizationIgnored by remember { mutableStateOf(false) }
+    var batteryOptimizationIgnored by remember { mutableStateOf(
+        runCatching {
+            val pm = context.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+            pm.isIgnoringBatteryOptimizations(context.packageName)
+        }.getOrDefault(false)
+    ) }
 
     // ---- paired dashboards state (session management) ----
     val scope = rememberCoroutineScope()
@@ -248,9 +255,22 @@ fun SettingsScreen(
                     )
                     SwitchSettingRow(
                         title = "Ignore Battery Optimizations",
-                        subtitle = "Prevent system from killing the background service",
+                        subtitle = "Prevent system from killing the background service (required for 24/7 persistence)",
                         checked = batteryOptimizationIgnored,
-                        onCheckedChange = { batteryOptimizationIgnored = it }
+                        onCheckedChange = { enable ->
+                            batteryOptimizationIgnored = enable
+                            try {
+                                // Launch the system's battery-optimization
+                                // exemption dialog (user must accept once).
+                                val intent = android.content.Intent(
+                                    android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                    android.net.Uri.parse("package:${context.packageName}")
+                                )
+                                context.startActivity(intent)
+                            } catch (e: Exception) {
+                                android.util.Log.w("Settings", "Battery-opt request failed: ${e.message}")
+                            }
+                        }
                     )
                 }
             }
@@ -379,7 +399,7 @@ fun SettingsScreen(
                         modifier = Modifier.padding(vertical = 4.dp),
                         color = MaterialTheme.colorScheme.outlineVariant
                     )
-                    AboutRow(label = "Version", value = "1.0.0")
+                    AboutRow(label = "Version", value = "2.0.0")
                     HorizontalDivider(
                         modifier = Modifier.padding(vertical = 4.dp),
                         color = MaterialTheme.colorScheme.outlineVariant

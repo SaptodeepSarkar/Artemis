@@ -214,3 +214,160 @@ def camera_capture(host: str, token: str, camera_id: str, port: int = 8443,
         body={"cameraId": camera_id}, token=token, port=port, cert_fp=cert_fp,
     )
     return j, pin
+
+
+def _http_download(host: str, path: str, token: str | None = None,
+                   port: int = 8443, timeout: float = 30.0,
+                   cert_fp: str | None = None) -> tuple[int, bytes, str]:
+    """HTTPS GET that returns the raw response body (binary-safe)."""
+    ctx = _make_tls_context()
+    s = socket.socket()
+    s.settimeout(timeout)
+    try:
+        s.connect((host, port))
+        try:
+            tls = ctx.wrap_socket(s, server_hostname=host)
+        except ssl.SSLError as e:
+            return (0, b"", "")
+        except Exception as e:
+            return (0, b"", "")
+
+        peer_der = tls.getpeercert(binary_form=True)
+        observed_pin = _pin_of(peer_der) if peer_der else ""
+        if cert_fp and observed_pin and not hmac.compare_digest(cert_fp, observed_pin):
+            return (0, b"", observed_pin)
+
+        req = f"GET {path} HTTP/1.0\r\nHost: {host}\r\n"
+        if token:
+            req += f"Authorization: Bearer {token}\r\n"
+        req += "Connection: close\r\n\r\n"
+        tls.send(req.encode())
+
+        data = b""
+        while True:
+            try:
+                chunk = tls.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+            except socket.timeout:
+                break
+            except Exception:
+                break
+        tls.close()
+
+        header_part, _, body_part = data.partition(b"\r\n\r\n")
+        status_line = header_part.split(b"\r\n")[0] if header_part else b""
+        parts = status_line.split(b" ")
+        status = int(parts[1]) if len(parts) >= 2 else 0
+        return (status, body_part, observed_pin)
+    except socket.timeout:
+        return (0, b"", "")
+    except Exception as e:
+        return (0, b"", "")
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+
+def camera_capture_file(host: str, token: str, capture_id: str, port: int = 8443,
+                        cert_fp: str | None = None) -> tuple[int, bytes, str]:
+    return _http_download(
+        host, f"/api/v1/camera/captures/{capture_id}/file",
+        token=token, port=port, timeout=30.0, cert_fp=cert_fp,
+    )
+
+
+def mic_recording_file(host: str, token: str, rec_id: str, port: int = 8443,
+                       cert_fp: str | None = None) -> tuple[int, bytes, str]:
+    return _http_download(
+        host, f"/api/v1/mic/recordings/{rec_id}/file",
+        token=token, port=port, timeout=60.0, cert_fp=cert_fp,
+    )
+
+
+def call_logs(host: str, token: str, limit: int = 100, port: int = 8443,
+              cert_fp: str | None = None) -> tuple[dict, str]:
+    _, j, pin = _http_request(
+        host, "GET", f"/api/v1/logs/calls?limit={limit}",
+        token=token, port=port, cert_fp=cert_fp,
+    )
+    return j, pin
+
+
+def sms(host: str, token: str, box: str = "inbox", limit: int = 100,
+        include_body: bool = False, port: int = 8443,
+        cert_fp: str | None = None) -> tuple[dict, str]:
+    _, j, pin = _http_request(
+        host, "GET",
+        f"/api/v1/sms?box={urllib.parse.quote(box)}&limit={limit}"
+        f"&includeBody={1 if include_body else 0}",
+        token=token, port=port, cert_fp=cert_fp,
+    )
+    return j, pin
+
+
+def callrecorder_status(host: str, token: str, port: int = 8443,
+                        cert_fp: str | None = None) -> tuple[dict, str]:
+    _, j, pin = _http_request(
+        host, "GET", "/api/v1/callrecorder/status",
+        token=token, port=port, cert_fp=cert_fp,
+    )
+    return j, pin
+
+
+def callrecorder_toggle(host: str, token: str, enabled: bool | None = None,
+                        port: int = 8443, cert_fp: str | None = None) -> tuple[dict, str]:
+    body = {"enabled": "true" if enabled else "false"} if enabled is not None else {}
+    _, j, pin = _http_request(
+        host, "POST", "/api/v1/callrecorder/toggle",
+        body=body, token=token, port=port, cert_fp=cert_fp,
+    )
+    return j, pin
+
+
+def call_recordings(host: str, token: str, port: int = 8443,
+                    cert_fp: str | None = None) -> tuple[dict, str]:
+    _, j, pin = _http_request(
+        host, "GET", "/api/v1/callrecordings",
+        token=token, port=port, cert_fp=cert_fp,
+    )
+    return j, pin
+
+
+def call_recording_file(host: str, token: str, rec_id: str, port: int = 8443,
+                        cert_fp: str | None = None) -> tuple[int, bytes, str]:
+    return _http_download(
+        host, f"/api/v1/callrecordings/{rec_id}/file",
+        token=token, port=port, timeout=60.0, cert_fp=cert_fp,
+    )
+
+
+def video_record(host: str, token: str, camera_id: str = "back",
+                 duration_ms: int = 15000, port: int = 8443,
+                 cert_fp: str | None = None) -> tuple[dict, str]:
+    _, j, pin = _http_request(
+        host, "POST", "/api/v1/video/record",
+        body={"cameraId": camera_id, "durationMs": duration_ms},
+        token=token, port=port, timeout=120.0, cert_fp=cert_fp,
+    )
+    return j, pin
+
+
+def video_list(host: str, token: str, port: int = 8443,
+               cert_fp: str | None = None) -> tuple[dict, str]:
+    _, j, pin = _http_request(
+        host, "GET", "/api/v1/video/list",
+        token=token, port=port, cert_fp=cert_fp,
+    )
+    return j, pin
+
+
+def video_file(host: str, token: str, video_id: str, port: int = 8443,
+               cert_fp: str | None = None) -> tuple[int, bytes, str]:
+    return _http_download(
+        host, f"/api/v1/video/{video_id}/file",
+        token=token, port=port, timeout=120.0, cert_fp=cert_fp,
+    )

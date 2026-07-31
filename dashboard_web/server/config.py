@@ -11,6 +11,12 @@ from cryptography.fernet import Fernet
 CONFIG_DIR = Path.home() / ".config" / "artemis"
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
+# Downloaded capture files (photos/videos pulled from phones) live here,
+# one subdirectory per device ("host_port").
+CAPTURES_DIR = CONFIG_DIR / "captures"
+CAPTURES_DIR.mkdir(parents=True, exist_ok=True)
+captures_dir = CAPTURES_DIR
+
 # Server
 HOST = os.environ.get("ARTEMIS_DASHBOARD_HOST", "0.0.0.0")
 PORT = int(os.environ.get("ARTEMIS_DASHBOARD_PORT", "5000"))
@@ -82,6 +88,11 @@ def decrypt_token(blob: str) -> str:
         except Exception:
             return ""  # undecryptable — treat as absent, re-pair will refresh it
     return blob  # legacy plaintext
+
+
+def decrypt_text(blob: str) -> str:
+    """Decrypt a stored text value ('enc:' prefix); plaintext passes through."""
+    return decrypt_token(blob)
 
 
 # Fields that must never be persisted in plaintext.

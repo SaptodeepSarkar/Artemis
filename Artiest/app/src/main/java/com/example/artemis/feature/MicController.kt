@@ -167,22 +167,96 @@ class MicController(private val context: Context) {
         if (file != null && file.exists()) {
             val duration = System.currentTimeMillis() - currentRecordingStartTime
 
-            // Update the recording entry
-            synchronized(recordings) {
-                val index = recordings.indexOfFirst { it.filePath == file.absolutePath }
-                if (index >= 0) {
-                    val updated = recordings[index].copy(
-                        durationMs = duration,
-                        fileSize = file.length(),
-                        mimeType = "audio/pcm"
-                    )
-                    recordings[index] = updated
-                    return@withContext Result.success(updated)
+            // Convert raw PCM to a playable WAV (RIFF header + PCM data).
+            val wavFile = convertPcmToWav(file)
+            if (wavFile != null && wavFile.exists()) {
+                // Update the recording entry to point at the WAV file.
+                synchronized(recordings) {
+                    val index = recordings.indexOfFirst { it.filePath == file.absolutePath }
+                    if (index >= 0) {
+                        val updated = recordings[index].copy(
+                            durationMs = duration,
+                            fileSize = wavFile.length(),
+                            mimeType = "audio/wav",
+                            filePath = wavFile.absolutePath
+                        )
+                        recordings[index] = updated
+                        return@withContext Result.success(updated)
+                    }
+                }
+            } else {
+                // Conversion failed — keep the raw PCM entry.
+                synchronized(recordings) {
+                    val index = recordings.indexOfFirst { it.filePath == file.absolutePath }
+                    if (index >= 0) {
+                        val updated = recordings[index].copy(
+                            durationMs = duration,
+                            fileSize = file.length(),
+                            mimeType = "audio/pcm"
+                        )
+                        recordings[index] = updated
+                        return@withContext Result.success(updated)
+                    }
                 }
             }
         }
 
         Result.failure(Exception("Failed to stop recording"))
+    }
+
+    /**
+     * Wrap raw PCM16 mono data in a WAV container so the file is playable
+     * by any player. Returns the new file, or null on failure.
+     */
+    private fun convertPcmToWav(pcmFile: File): File? {
+        return try {
+            val pcmBytes = pcmFile.readBytes()
+            if (pcmBytes.isEmpty()) return null
+
+            val wavFile = File(recordingsDir, pcmFile.nameWithoutExtension + ".wav")
+            val byteRate = SAMPLE_RATE * 2 // 16-bit mono
+            val dataSize = pcmBytes.size
+
+            val header = java.io.ByteArrayOutputStream().use { out ->
+                out.write("RIFF".toByteArray())
+                out.write(intToLeBytes(36 + dataSize))
+                out.write("WAVE".toByteArray())
+                out.write("fmt ".toByteArray())
+                out.write(intToLeBytes(16))          // fmt chunk size
+                out.write(shortToLeBytes(1))         // PCM
+                out.write(shortToLeBytes(1))         // mono
+                out.write(intToLeBytes(SAMPLE_RATE))
+                out.write(intToLeBytes(byteRate))
+                out.write(shortToLeBytes(2))         // block align
+                out.write(shortToLeBytes(16))        // bits per sample
+                out.write("data".toByteArray())
+                out.write(intToLeBytes(dataSize))
+                out.toByteArray()
+            }
+
+            wavFile.writeBytes(header + pcmBytes)
+            pcmFile.delete()
+            wavFile
+        } catch (e: Exception) {
+            android.util.Log.e("MicController", "WAV conversion failed: ${e.message}")
+            null
+        }
+    }
+
+    private fun intToLeBytes(value: Int): ByteArray {
+        return byteArrayOf(
+            (value and 0xFF).toByte(),
+            ((value shr 8) and 0xFF).toByte(),
+            ((value shr 16) and 0xFF).toByte(),
+            ((value shr 24) and 0xFF).toByte()
+        )
+    }
+
+    private fun shortToLeBytes(value: Int): ByteArray {
+        return byteArrayOf(
+            (value and 0xFF).toByte(),
+            ((value shr 8) and 0xFF).toByte()
+        )
     }
 
     /**
@@ -205,6 +279,13 @@ class MicController(private val context: Context) {
         synchronized(recordings) {
             return recordings.find { it.id == id }
         }
+    }
+
+    /** Resolve the on-disk audio file for a recording id, or null. */
+    fun getRecordingFile(id: String): File? {
+        val rec = getRecording(id) ?: return null
+        val f = File(rec.filePath)
+        return if (f.exists()) f else null
     }
 
     private fun stopRecordingInternal() {

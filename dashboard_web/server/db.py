@@ -327,11 +327,29 @@ def list_media(device_key: str) -> list[dict]:
         conn.close()
 
 
+def get_media(media_id: int) -> dict | None:
+    """Fetch a single media row (decrypted path/note) or None."""
+    _ensure()
+    conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT * FROM media WHERE id=?", (media_id,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["path"] = _dec(d.get("path"))
+        d["note"] = _dec(d.get("note"))
+        return d
+    finally:
+        conn.close()
+
+
 def add_media(device_key: str, kind: str, path: str = "", size_bytes: int = 0,
               duration_sec: float = 0.0, note: str = "",
               captured_at: Optional[float] = None) -> dict:
     _ensure()
-    if kind not in ("call_recording", "video", "screen_recording", "screenshot", "photo"):
+    if kind not in ("call_recording", "video", "screen_recording", "screenshot",
+                    "photo", "mic_recording"):
         raise ValueError(f"unknown media kind: {kind}")
     conn = _connect()
     try:

@@ -8,6 +8,8 @@ let deviceKey = "";
     loadCameras();
     loadMedia();
     loadNickname();
+    loadCallLogs();
+    loadSms();
 })();
 
 function getHostPort() {
@@ -130,6 +132,107 @@ async function capturePhoto() {
     box.innerHTML = `<div class="font-label text-xs text-maquis-green tracking-widest uppercase">CAPTURE_${data.status === "ok" ? "OK" : "FAILED"}</div>`;
 }
 
+// Capture AND pull the file into the local store + media catalogue.
+async function capturePhotoPull() {
+    const { host, port } = getHostPort();
+    const sel = document.querySelector('input[name="camera_sensor"]:checked');
+    const cameraId = sel ? sel.value : "back";
+    const btn = document.getElementById("captureBtn");
+    const original = btn.innerHTML;
+    btn.innerHTML = '<span class="material-symbols-outlined text-lg animate-spin">progress_activity</span> CAPTURING';
+    btn.disabled = true;
+    try {
+        const data = await api(`/api/device/${host}/${port}/camera/capture/pull?camera_id=${cameraId}`,
+            { method: "POST", body: JSON.stringify({}) });
+        const box = document.getElementById("cameraData");
+        box.classList.remove("hidden");
+        box.innerHTML = data && data.ok
+            ? `<div class="font-label text-xs text-maquis-green tracking-widest uppercase">CAPTURE_STORED</div>`
+            : `<div class="font-label text-xs text-hunt-crimson tracking-widest uppercase">CAPTURE_FAILED</div>`;
+        if (data && data.ok) loadMedia();
+    } finally {
+        btn.innerHTML = original;
+        btn.disabled = false;
+    }
+}
+
+// Video recording (CameraX on phone, duration-limited, auto-pulled)
+async function recordVideo(durationMs) {
+    const { host, port } = getHostPort();
+    const btn = document.getElementById("videoBtn");
+    if (btn) { btn.innerHTML = '<span class="material-symbols-outlined text-lg animate-spin">progress_activity</span> RECORDING'; btn.disabled = true; }
+    try {
+        const data = await api(`/api/device/${host}/${port}/video/record?camera_id=back&duration_ms=${durationMs}`,
+            { method: "POST", body: JSON.stringify({}) });
+        const box = document.getElementById("cameraData");
+        box.classList.remove("hidden");
+        box.innerHTML = data && data.ok
+            ? `<div class="font-label text-xs text-maquis-green tracking-widest uppercase">VIDEO_STORED ${fmtDur((data.video?.durationMs || 0) / 1000)}</div>`
+            : `<div class="font-label text-xs text-hunt-crimson tracking-widest uppercase">VIDEO_FAILED</div>`;
+        if (data && data.ok) loadMedia();
+    } finally {
+        if (btn) { btn.innerHTML = '<span class="material-symbols-outlined text-lg">videocam</span> REC 5S'; btn.disabled = false; }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Call logs + SMS (v2.0.0 — phone-side providers, TLS-authenticated)
+// ---------------------------------------------------------------------------
+
+async function loadCallLogs() {
+    const { host, port } = getHostPort();
+    const list = document.getElementById("callLogsList");
+    const data = await api(`/api/device/${host}/${port}/logs/calls?limit=50`);
+    if (!data) return;
+    const calls = data.calls || [];
+    if (!calls.length) {
+        list.innerHTML = `<div class="flex items-center gap-3 p-3 border border-moon-silver/10 rounded opacity-50">
+            <span class="material-symbols-outlined text-sm text-moon-silver/60">call</span>
+            <span class="font-label text-sm text-on-surface/60">NO_CALLS</span></div>`;
+        return;
+    }
+    list.innerHTML = calls.map(c => `
+        <div class="flex items-center gap-3 p-3 border border-moon-silver/10 rounded">
+            <span class="material-symbols-outlined text-sm ${callTypeColor(c.type)}">${callTypeIcon(c.type)}</span>
+            <div class="flex-1 min-w-0">
+                <div class="font-label text-sm text-on-surface truncate">${esc(c.number || "unknown")}${c.cachedName ? " · " + esc(c.cachedName) : ""}</div>
+                <div class="font-label text-[10px] text-moon-silver/50">${esc((c.type || "unknown").toUpperCase())} · ${fmtDur(c.durationSec)} · ${new Date(c.date).toLocaleString()}</div>
+            </div>
+        </div>`).join("");
+}
+
+function callTypeColor(t) { return { incoming: "text-maquis-green", outgoing: "text-pyrenees-frost", missed: "text-hunt-crimson" }[t] || "text-moon-silver/60"; }
+function callTypeIcon(t) { return { incoming: "call_received", outgoing: "call_made", missed: "missed_video_call" }[t] || "call"; }
+
+async function loadSms() {
+    const { host, port } = getHostPort();
+    const box = document.getElementById("smsBox").value || "inbox";
+    const include = document.getElementById("smsIncludeBody").checked ? 1 : 0;
+    const list = document.getElementById("smsList");
+    const data = await api(`/api/device/${host}/${port}/sms?box=${box}&limit=50&include_body=${include}`);
+    if (!data) return;
+    const msgs = data.messages || [];
+    if (!msgs.length) {
+        list.innerHTML = `<div class="flex items-center gap-3 p-3 border border-moon-silver/10 rounded opacity-50">
+            <span class="material-symbols-outlined text-sm text-moon-silver/60">sms</span>
+            <span class="font-label text-sm text-on-surface/60">NO_MESSAGES</span></div>`;
+        return;
+    }
+    list.innerHTML = msgs.map(m => `
+        <div class="flex items-start gap-3 p-3 border border-moon-silver/10 rounded">
+            <span class="material-symbols-outlined text-sm text-pyrenees-frost">${box === "sent" ? "send" : "sms"}</span>
+            <div class="flex-1 min-w-0">
+                <div class="font-label text-sm text-on-surface truncate">${esc(m.address || "unknown")}</div>
+                ${m.body ? `<div class="font-label text-[11px] text-moon-silver/80 mt-0.5">${esc(m.body)}</div>` : ""}
+                <div class="font-label text-[10px] text-moon-silver/50 mt-0.5">${new Date(m.date).toLocaleString()}${m.read ? "" : " · UNREAD"}</div>
+            </div>
+        </div>`).join("");
+}
+
+function esc(s) {
+    return String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
 // Mic toggle
 let micRecording = false;
 async function toggleMic() {
@@ -161,6 +264,8 @@ async function refreshDevice() {
     await loadStatus();
     await loadDeviceInfo();
     await loadMedia();
+    loadCallLogs();
+    loadSms();
 }
 
 // ---------------------------------------------------------------------------
@@ -204,12 +309,17 @@ async function loadMedia() {
     list.innerHTML = items.map(m => {
         const meta = MEDIA_META[m.kind] || { icon: "folder", label: m.kind };
         const metaLine = [fmtSize(m.size_bytes), fmtDur(m.duration_sec)].filter(Boolean).join(" · ");
+        const dl = m.download_url
+            ? `<a href="${m.download_url}" target="_blank" title="Download file" class="text-pyrenees-frost/70 hover:text-pyrenees-frost transition-colors p-1">
+                 <span class="material-symbols-outlined text-sm">download</span></a>`
+            : "";
         return `<div class="flex items-center gap-3 p-3 border border-moon-silver/10 rounded">
             <span class="material-symbols-outlined text-sm text-pyrenees-frost">${meta.icon}</span>
             <div class="flex-1 min-w-0">
                 <div class="font-label text-sm text-on-surface truncate">${meta.label}</div>
                 <div class="font-label text-[10px] text-moon-silver/50 truncate">${m.path || "—"}${metaLine ? " · " + metaLine : ""} · ${new Date((m.captured_at || Date.now()) * 1000).toLocaleString()}</div>
             </div>
+            ${dl}
             <button onclick="deleteMedia(${m.id})" title="Delete entry" class="text-moon-silver/40 hover:text-error transition-colors p-1">
                 <span class="material-symbols-outlined text-sm">delete</span>
             </button>

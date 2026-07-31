@@ -51,6 +51,9 @@
     <!-- Wake lock -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
+    <!-- Battery optimization exemption (background persistence) -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
     <!-- Nearby devices / NSD -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"
         tools:node="replace" />

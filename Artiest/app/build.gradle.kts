@@ -12,8 +12,8 @@ android {
         applicationId = "com.example.artemis"
         minSdk = 29
         targetSdk = 37
-        versionCode = 2
-        versionName = "1.4.1"
+        versionCode = 3
+        versionName = "2.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -80,6 +80,7 @@ dependencies {
     implementation(libs.camerax.core)
     implementation(libs.camerax.camera2)
     implementation(libs.camerax.lifecycle)
+    implementation(libs.camerax.video)
 
     // Location
     implementation(libs.play.services.location)

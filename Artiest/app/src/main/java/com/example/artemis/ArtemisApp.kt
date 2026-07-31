@@ -31,6 +31,15 @@ class ArtemisApp : Application() {
     @Volatile
     var currentCertFingerprint: String? = null
 
+    // Shared reference to the running server instance (owned by the
+    // foreground service). Lets the watchdog worker and the UI check
+    // liveness without binding to the service.
+    @Volatile
+    var serverRef: com.example.artemis.server.SimpleHttpServer? = null
+
+    @Volatile
+    var serverStartedAt: Long = 0L
+
     override fun onCreate() {
         super.onCreate()
         instance = this

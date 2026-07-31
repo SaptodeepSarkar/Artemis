@@ -129,6 +129,10 @@ class DeviceRegistry:
     def list_media(self, key: str) -> list[dict]:
         return db.list_media(key)
 
+    def get_media(self, media_id: int) -> dict | None:
+        """Fetch a single media row (with device_key/path/kind) or None."""
+        return db.get_media(media_id)
+
     def add_media(self, key: str, kind: str, path: str = "", size_bytes: int = 0,
                   duration_sec: float = 0.0, note: str = "") -> dict:
         return db.add_media(key, kind, path=path, size_bytes=size_bytes,

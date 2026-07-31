@@ -224,11 +224,50 @@
 </div>
 </div>
 <div id="cameraData" class="hidden"></div>
-<div class="mt-auto pt-6">
-<button onclick="capturePhoto()" class="w-full py-4 bg-hunt-crimson/10 border border-hunt-crimson/50 text-hunt-crimson font-label text-sm font-bold tracking-widest rounded hover:bg-hunt-crimson hover:text-white transition-all flex items-center justify-center gap-2 group">
+<div class="mt-auto pt-6 space-y-3">
+<button onclick="capturePhotoPull()" id="captureBtn" class="w-full py-4 bg-hunt-crimson/10 border border-hunt-crimson/50 text-hunt-crimson font-label text-sm font-bold tracking-widest rounded hover:bg-hunt-crimson hover:text-white transition-all flex items-center justify-center gap-2 group">
 <span class="material-symbols-outlined text-lg group-hover:scale-110 transition-transform">camera_enhance</span>
                                     CAPTURE
                                 </button>
+<button onclick="recordVideo(5000)" id="videoBtn" class="w-full py-2.5 bg-pyrenees-frost/10 border border-pyrenees-frost/50 text-pyrenees-frost font-label text-xs font-bold tracking-widest rounded hover:bg-pyrenees-frost hover:text-white transition-all flex items-center justify-center gap-2">
+<span class="material-symbols-outlined text-lg">videocam</span>
+                                    REC 5S
+                                </button>
+</div>
+</div>
+</div>
+<!-- Call Logs Panel -->
+<div class="col-span-1 bg-surface-elevation/40 border border-moon-silver/10 rounded-lg p-6 flex flex-col">
+<h3 class="font-headline text-lg font-bold text-on-surface flex items-center gap-2 mb-6">
+<span class="material-symbols-outlined text-sm">call</span> CALL LOGS
+                        </h3>
+<div class="flex-1 flex flex-col gap-2 overflow-y-auto max-h-[420px]" id="callLogsList">
+<div class="flex items-center gap-3 p-3 border border-moon-silver/10 rounded opacity-50">
+<span class="material-symbols-outlined text-sm text-moon-silver/60">hourglass_empty</span>
+<span class="font-label text-sm text-on-surface/60">LOADING...</span>
+</div>
+</div>
+</div>
+<!-- SMS Panel -->
+<div class="col-span-1 bg-surface-elevation/40 border border-moon-silver/10 rounded-lg p-6 flex flex-col">
+<h3 class="font-headline text-lg font-bold text-on-surface flex items-center gap-2 mb-6">
+<span class="material-symbols-outlined text-sm">sms</span> SMS
+                        </h3>
+<div class="flex items-center gap-3 mb-4">
+<select id="smsBox" onchange="loadSms()" class="flex-1 bg-void-black border border-moon-silver/20 text-on-surface font-label text-sm py-2 px-3 rounded">
+<option value="inbox">INBOX</option>
+<option value="sent">SENT</option>
+<option value="draft">DRAFTS</option>
+<option value="failed">FAILED</option>
+</select>
+<label class="flex items-center gap-2 font-label text-[10px] text-moon-silver/70 tracking-widest cursor-pointer">
+<input type="checkbox" id="smsIncludeBody" onchange="loadSms()" class="accent-hunt-crimson"> BODIES
+</label>
+</div>
+<div class="flex-1 flex flex-col gap-2 overflow-y-auto max-h-[380px]" id="smsList">
+<div class="flex items-center gap-3 p-3 border border-moon-silver/10 rounded opacity-50">
+<span class="material-symbols-outlined text-sm text-moon-silver/60">hourglass_empty</span>
+<span class="font-label text-sm text-on-surface/60">LOADING...</span>
 </div>
 </div>
 </div>

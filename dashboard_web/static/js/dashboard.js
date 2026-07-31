@@ -37,11 +37,14 @@ async function loadStatus() {
     const icon = document.getElementById("statusOnlineIcon");
     if (val) {
         val.textContent = online ? "ONLINE" : "OFFLINE";
-        // Offline devices render in black (per spec) — green only when live.
-        val.className = "font-headline text-2xl font-bold value " + (online ? "text-maquis-green" : "text-black");
+        // Offline devices render in black (per spec) — on a light chip so
+        // the black stays visible against the dark card.
+        val.className = "font-headline text-2xl font-bold value " +
+            (online ? "text-maquis-green" : "text-black bg-white/90 px-3 py-1 rounded");
     }
     if (icon) {
-        icon.className = "material-symbols-outlined " + (online ? "text-maquis-green animate-pulse" : "text-black");
+        icon.className = "material-symbols-outlined " +
+            (online ? "text-maquis-green animate-pulse" : "text-black bg-white/90 rounded-full p-1");
     }
     setVal("#statusUptime .value",
         data.uptimeSeconds ? fmtUptime(data.uptimeSeconds) : "—");

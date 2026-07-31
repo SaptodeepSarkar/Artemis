@@ -3,8 +3,8 @@
 > Written 2026-07-31 (v1.4.1 + encrypted-SQLite dashboard phase).
 > Read this FIRST, then `docs/SECURITY.md` (full threat model), then the
 > per-module READMEs. It tells you how to regain context in ~10 minutes,
-> what is done, and what the next phase (implement the app's capture
-> features) looks like.
+> what is done, and what the next phase (v2.0.0 — background persistence,
+> feature fixes, admin-grade UI) looks like.
 
 ---
 
@@ -105,7 +105,7 @@ successful pair, and on app restart. Never logged, never sent over the wire.
   pin match, authenticated device/info, pairing rotation, 18/18 mock E2E
   (replay→revoke, grace, at-rest encryption, wrong-pin rejection).
 
-### 2.2 Encrypted-SQLite dashboard phase (this session — commit pending)
+### 2.2 Encrypted-SQLite dashboard phase (committed `675f585` + `b5b8430`, pushed)
 
 - **`dashboard_web/server/db.py`**: SQLite store at
   `~/.config/artemis/artemis.db` replacing `devices.json`, `tokens.json`,
@@ -147,66 +147,132 @@ successful pair, and on app restart. Never logged, never sent over the wire.
 
 ---
 
-## 3. What's NEXT: implement the app (the actual capture features)
+## 3. What's NEXT: make the app a super-user admin tool — v2.0.0
 
-The security + storage backbone is done. The phone app currently only pairs,
-serves health/device info, and exposes a camera capture endpoint. The next
-phase is the meat: **capture features on the phone, streaming files to the
-dashboard's media catalogue.**
+**Directive from the user (2026-07-31, verbatim intent):**
 
-### 3.1 Phone-side features to build (in `Artiest/`)
+> "the agent will work on making the app a super user... right now when I
+> remove the app from the background the server dies immediately — I want
+> the app to be active and serve data in the background. Also this agent
+> must work on UI/UX of the app. This app should become admin. Right now
+> nothing works except getting location and device info — we have to fix
+> the features like camera, call logs etc."
 
-| Feature | Android APIs / approach | Pitfalls |
+The security + storage backbone (sections 2.1/2.2) is DONE and FROZEN. The
+next agent's job is the phone app itself: keep it alive, fix its features,
+and make it feel like an admin-grade tool. **Deliverable: commit the work
+to GitHub as `2.0.0`.**
+
+### 3.1 HARD RULE — the communication sector is FROZEN. DO NOT TOUCH IT.
+
+The user's explicit instruction: **fix the app WITHOUT touching the
+communication sector.** That sector is:
+
+- `Artiest/app/src/main/java/com/example/artemis/auth/AuthManager.kt`
+  (pairing, token lifecycle, replay detection, grace window)
+- `Artiest/app/src/main/java/com/example/artemis/server/TlsManager.kt`
+  (TLS versions, keystore, handshake)
+- `Artiest/app/src/main/java/com/example/artemis/server/SimpleHttpServer.kt`
+  — the **security enforcement inside it**: token/pin verification,
+  pairing-code handling, lockout, rate limiting, constant-time compares.
+  Adding NEW capture/log endpoints to this server is expected and allowed,
+  but do NOT modify, "improve", or refactor the existing auth/security
+  logic. No changes to: pairing UX, code rotation, TLS behavior, token
+  storage, revocation semantics.
+- `dashboard_web/server/device_client.py` + `dashboard/artemis.py` client
+  auth paths (unless you are fixing a NEW endpoint's wiring).
+
+If a fix seems to REQUIRE touching the frozen sector, STOP and report back
+instead of changing it.
+
+### 3.2 Priority 1 — Background persistence (the server must NOT die)
+
+Current failure: swiping the app away from recents kills the process and
+the :8443 server dies instantly. The app must run and serve data in the
+background, screen off, app swiped away, and across reboots.
+
+- **Foreground service** owns the `ServerSocket`, NOT the activity:
+  `android:foregroundServiceType`, persistent notification (channel id,
+  low importance so it can be hidden from the user if desired), `startForeground()`
+  within seconds of `onCreate`.
+- `START_STICKY` (or `START_REDELIVER_INTENT`) + `onTaskRemoved()` →
+  restart the service when the user swipes the app away.
+- `PARTIAL_WAKE_LOCK` while the server is listening; release on destroy.
+- **Doze / battery optimization**: request exemption
+  (`ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`), keep-alive via
+  `AlarmManager` (setExactAndAllowWhileIdle) or WorkManager periodic
+  ping that re-arms the socket if dead. Note the Samsung M51 is aggressive
+  (see §4 freezer pitfall) — expect to fight this.
+- **Boot receiver** (`RECEIVE_BOOT_COMPLETED`) to restart the service
+  after reboot (pairing + keystore survive — no re-pair).
+- Verify: swipe app from recents → `curl https://<phone>:8443/health`
+  still answers; screen off 30+ min → still answers; reboot → auto-restarts.
+
+### 3.3 Priority 2 — Fix the features (currently only location + device info work)
+
+The dashboard's per-device page already has buttons/panels for these —
+they mostly 4xx/timeout because the phone side is missing or broken.
+Fix or build each, end-to-end:
+
+| Feature | Phone-side work | Notes |
 |---|---|---|
-| **Call recording** | `MediaRecorder` (MIC or VOICE_CALL source), trigger via `TelephonyManager` call state; store `.mp3/.m4a` in app filesDir | VOICE_CALL needs RECORD_AUDIO + call state permission; Samsung may silence VOICE_CALL — fall back to MIC; must run in foreground service |
-| **Video recording** | `MediaRecorder` + `Camera2` (or CameraX), user-facing "record video" command from dashboard | Camera is exclusive — release before screen capture; doze |
-| **Screen recording** | `MediaProjection` (API 21+, but **Android 10+ requires user consent dialog per session**) | The consent dialog is a UX wrinkle for a remote-control RAT — user must tap "Start now" once per projection; document this. `MediaProjectionManager.createScreenCaptureIntent()` |
-| **Screenshots** | `MediaProjection` (virtual display → ImageReader) or `AccessibilityService` | Same consent caveat; ImageReader → Bitmap → PNG |
-| **Photo capture** | Already exists: `POST /api/device/{host}/{port}/camera/capture?camera_id=...` on the phone + dashboard button | — |
-| **File delivery** | After capture, POST the file to the dashboard (new endpoint, see 3.3) | Must be authenticated (bearer token) + TLS + pinned, like everything else |
+| **Camera capture** | `POST /camera/capture` EXISTS but reportedly doesn't work — debug live (permissions, camera reopen after release, response shape) until a photo lands on the dashboard | Highest priority — it's already wired in the UI |
+| **Call logs** | New route `GET /logs/calls` → `CallLog.Calls` content provider (number, type, duration, timestamp) | Needs `READ_CALL_LOG` |
+| **SMS** | New route `GET /sms` → Telephony SMS provider | Needs `READ_SMS`; redact bodies unless user wants them |
+| **Call recording** | `MediaRecorder` (MIC or VOICE_CALL source), trigger on `TelephonyManager` call state; store `.m4a` in filesDir | VOICE_CALL may be silenced on Samsung — fall back to MIC; MUST run inside the foreground service (§3.2) |
+| **Video recording** | `MediaRecorder` + Camera2/CameraX, dashboard-triggered | Camera is exclusive — release before screen capture |
+| **Screen recording** | `MediaProjection` — **Android 10+ needs a user consent dialog per session** | Consent wrinkle is inherent; document it, don't fight it |
+| **Screenshots** | `MediaProjection` virtual display → `ImageReader` → PNG, or AccessibilityService | Same consent caveat |
+| **Location + device info** | Already work — regression-guard them | |
 
-### 3.2 Server-side pieces to add (phone, `SimpleHttpServer.kt`)
+After each capture, register the metadata row on the dashboard via the
+existing `POST /api/device/{host}/{port}/media` (the DB + media panel are
+already built and verified) so files show up in the catalogue. Add a
+file-upload variant of that endpoint (multipart → store bytes under
+`~/.config/artemis/captures/<device>/`, then register the media row) and a
+download link per entry on the dashboard.
 
-- New routes: `POST /capture/call` , `POST /capture/video`,
-  `POST /capture/screen`, `POST /capture/screenshot`, `GET /captures` (list
-  on-device files). Each returns `{capture_id, path, size, duration}`.
-- Keep the security invariants: auth via bearer token, lockout/rate limits,
-  no exception leakage, `\r\n` line endings in `sendHttpResponse()`.
-- Captures land in `filesDir/captures/<type>/...` (survives `install -r`).
+### 3.4 Priority 3 — App UI/UX ("this app should become admin")
 
-### 3.3 Dashboard-side ingest (mostly built — needs the file endpoint)
+- The app should feel like a professional admin/super-user surface, not a
+  dev toy: dark theme consistent with the dashboard, a status screen
+  (server up/down, uptime, service state, last seen, paired dashboards),
+  feature toggles, and clear states for each capture feature.
+- The pairing screen is FROZEN (open → 6-digit code → enter once). You may
+  restyle it, not rework its flow.
+- `SettingsScreen.kt` exists for paired-dashboard management — extend, don't
+  break.
 
-- `POST /api/device/{host}/{port}/media` already registers metadata; add a
-  file-upload variant (multipart) that stores the bytes under
-  `~/.config/artemis/captures/<device>/...` (or the DB as BLOB — prefer
-  files + DB metadata) and then registers the media row.
-- The media panel UI already renders the catalogue; add a download link per
-  entry (serve via an authenticated route).
-- Optionally: a "capture now" panel on the per-device dashboard page
-  (buttons: record call, screenshot, etc.) hitting the new phone routes.
-
-### 3.4 UX constraints that MUST NOT change
+### 3.5 UX + architecture constraints that MUST NOT change
 
 - Open app → see code → enter once → paired forever. No re-pairing on
   upgrade (keystore survives `install -r`).
 - Pairing code never logged / never networked.
-- Offline = black, ONLINE = green (user's explicit color spec).
+- Offline = black, ONLINE = green on the dashboard (user's color spec).
 - `.config` contains only the DB + key + admin password.
 - Token expiry never unregisters a device.
 
-### 3.5 Testing the next phase
+### 3.6 Versioning, testing, delivery
 
-1. Build + install: `adb -s 100.91.166.21:46341 install -r .../app-debug.apk`
-   (pairing survives).
-2. Phone must be UNLOCKED with app foregrounded for any live test — Samsung
-   M51 freezes app sockets in Doze AND under the PIN keyguard (adb-forward
-   tests then time out at the TLS handshake). `svc power stayon true` helps
-   only when unlocked.
-3. Live pairing E2E: `python3 /tmp/artemis_verify_full.py --host 100.91.166.21
-   --code <code-from-screen>`.
-4. After capture features: verify a file lands on the dashboard, the media
-   row appears (path/size/duration), and the DB row is encrypted at rest
-   (`python3 -c "import sqlite3;... SELECT path FROM media"` → `enc:` prefix).
+- Bump `Artiest/app/build.gradle.kts` to **versionName "2.0.0"** and
+  **versionCode 3** (strictly increasing; current = versionCode 2).
+- Align the header of `docs/SECURITY.md` ("Version 2.0.0 · …") — that file
+  documents the DESIGN, which is unchanged; only the version line moves.
+- Testing loop:
+  1. Build: `JAVA_HOME=/opt/android-studio/jbr GRADLE_OPTS="-Djava.version=21"`
+     `./gradlew :app:assembleDebug --console=plain -q` (in `Artiest/`).
+  2. Install: `adb -s 100.91.166.21:46341 install -r app-debug.apk`
+     (pairing survives `install -r`).
+  3. Phone must be UNLOCKED with app foregrounded for live tests (Samsung
+     M51 freezer, §4). Re-verify pairing with
+     `python3 /tmp/artemis_verify_full.py --host 100.91.166.21
+     --code <code-from-screen>`.
+  4. Per feature: trigger from the dashboard, confirm the file/row lands
+     and the DB value is `enc:`-prefixed (encrypted at rest).
+  5. Background tests (§3.2): swipe-away, screen-off, reboot.
+- **Deliverable:** commit to GitHub **as `2.0.0`** (tag `v2.0.0`),
+  work tree clean, handoff doc updated. Do NOT touch the frozen sector
+  (§3.1) — if you believe a fix needs it, stop and report.
 
 ---
 
@@ -239,7 +305,8 @@ dashboard's media catalogue.**
 
 - Git: work tree must stay clean; commit + push when a phase completes.
   v1.4.1 = tag `v1.4.1` = versionName "1.4.1" = versionCode 2 = SECURITY.md
-  header — keep them aligned for releases.
+  header — keep them aligned for releases. **Next release: 2.0.0**
+  (versionCode 3, tag `v2.0.0`) — the app-persistence/features/UI phase.
 - `.gitignore` covers `__pycache__/`, `*.pyc`.
 - No credentials appear anywhere in the repo or in this doc — pairing codes,
   tokens, pins and passwords are runtime state in `~/.config/artemis/` only.

@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import Callable
 from . import config
-from .device_client import ArtemisDevice, health as device_health
+from .device_client import ArtemisDevice, health as device_health, refresh as device_refresh
 
 
 class DeviceRegistry:
@@ -32,12 +32,14 @@ class DeviceRegistry:
     def add_device(self, host: str, port: int = 8443,
                    token: str = "", device_id: str = "",
                    name: str = "", paired: bool = False,
-                   cert_fp: str = "") -> ArtemisDevice:
+                   cert_fp: str = "", refresh_token: str = "",
+                   expires_at: float = 0.0) -> ArtemisDevice:
         key = f"{host}:{port}"
         dev = ArtemisDevice(
             host=host, port=port, token=token,
             device_id=device_id, name=name, paired=paired,
             last_seen=time.time(), cert_fp=cert_fp,
+            refresh_token=refresh_token, expires_at=expires_at,
         )
         with self._lock:
             self._devices[key] = dev
@@ -98,7 +100,8 @@ class DeviceRegistry:
         return found
 
     def refresh_all(self):
-        """Ping all known devices and update online status + TLS pin."""
+        """Ping all known devices, update online status + TLS pin, and keep
+        tokens alive (refresh before expiry) so pairings never lapse."""
         with self._lock:
             devices = list(self._devices.items())
         for key, dev in devices:
@@ -111,15 +114,95 @@ class DeviceRegistry:
                     if not dev.cert_fp and pin:
                         updates["cert_fp"] = pin
                     self.update_device(key, **updates)
+                    # Proactively refresh before the access token expires.
+                    if dev.paired:
+                        self.ensure_device_token(key)
                 elif info and info.get("error") == "cert_mismatch":
-                    # Pin changed — possible MITM or device re-pair. Force
-                    # re-pair and log the mismatch loudly.
-                    self.update_device(key, paired=False, last_seen=dev.last_seen)
-                    print(f"[artemis] TLS PIN MISMATCH for {key} — device forced unpaired", flush=True)
+                    # Pin changed — possible MITM or device re-pair. Delete the
+                    # trust relationship entirely: token, refresh token, pin.
+                    self.force_unpair(key, reason="TLS PIN MISMATCH")
                 else:
                     self.update_device(key, last_seen=dev.last_seen)  # keep old
             except:
                 pass
+
+    # ------------------------------------------------------------------
+    # Token lifecycle — refresh before expiry, never silently re-pair
+    # ------------------------------------------------------------------
+
+    # Refresh when the access token has less than this much life left.
+    REFRESH_MARGIN_SECONDS = 10 * 60
+
+    def force_unpair(self, key: str, reason: str = ""):
+        """Delete the trust relationship for a device: tokens AND pin are
+        cleared and the device is marked unpaired. The user must re-pair."""
+        with self._lock:
+            dev = self._devices.get(key)
+            if not dev:
+                return
+            dev.token = None
+            dev.refresh_token = ""
+            dev.expires_at = 0.0
+            dev.cert_fp = ""
+            dev.paired = False
+        self._save()
+        if reason:
+            print(f"[artemis] {reason} for {key} — trust relationship deleted, re-pair required", flush=True)
+
+    def ensure_device_token(self, key: str) -> tuple[bool, str]:
+        """Make sure a paired device has a usable access token, refreshing it
+        (with rotation) before it expires. Returns (ok, detail).
+
+        The user never notices: refresh happens lazily on access, well before
+        the 1-hour token expiry, using the 30-day refresh token.
+        """
+        dev = self.get_device(key)
+        if not dev:
+            return (False, "unknown_device")
+        if not dev.paired:
+            return (False, "not_paired")
+        if dev.token and dev.expires_at > 0 and \
+                time.time() < dev.expires_at - self.REFRESH_MARGIN_SECONDS:
+            return (True, "ok")  # token still fresh
+
+        if not dev.refresh_token:
+            # Pre-v1.5 pairing that never stored a refresh token. We must not
+            # mint tokens from the access token (that would extend theft
+            # windows); the dashboard must re-pair once.
+            return (False, "no_refresh_token")
+
+        try:
+            status, j, pin = device_refresh(
+                dev.host, dev.refresh_token, port=dev.port,
+                cert_fp=dev.cert_fp or None,
+            )
+        except Exception as e:
+            return (False, f"refresh_error: {e}")
+
+        if status == 200 and j and j.get("token"):
+            expires_ms = j.get("expiresAt") or 0
+            self.update_device(
+                key,
+                token=j["token"],
+                refresh_token=j.get("refreshToken", ""),
+                expires_at=expires_ms / 1000.0 if expires_ms else 0.0,
+                paired=True,
+            )
+            return (True, "refreshed")
+
+        err = (j or {}).get("error", "")
+        if err == "replay_detected":
+            # Refresh-token reuse detected by the phone — the device revoked
+            # us. Delete the local trust relationship; the user re-pairs.
+            self.force_unpair(key, reason="REFRESH TOKEN REPLAY DETECTED by device")
+            return (False, "replay_detected")
+        if err == "invalid_token" or status in (400, 401):
+            self.force_unpair(key, reason="Refresh token rejected by device")
+            return (False, "invalid_token")
+        if err == "cert_mismatch":
+            self.force_unpair(key, reason="TLS PIN MISMATCH during refresh")
+            return (False, "cert_mismatch")
+        return (False, f"refresh_failed: status={status}")
 
 
 # Singleton

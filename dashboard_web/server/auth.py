@@ -2,6 +2,7 @@
 import time
 import secrets
 import hashlib
+import hmac
 from fastapi import Request, HTTPException, Response
 from . import config
 
@@ -9,7 +10,8 @@ from . import config
 _sessions: dict[str, dict] = {}
 
 def verify_password(password: str) -> bool:
-    return password == config.ADMIN_PASSWORD
+    # Constant-time comparison — no timing side channel on the admin password.
+    return hmac.compare_digest(password.encode(), config.ADMIN_PASSWORD.encode())
 
 def create_session() -> str:
     token = secrets.token_urlsafe(32)

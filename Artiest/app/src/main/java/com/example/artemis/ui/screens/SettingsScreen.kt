@@ -14,10 +14,15 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Storage
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -25,6 +30,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
@@ -32,15 +38,27 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.launch
+
+/** A paired dashboard as reported by the phone's local server. */
+data class PairedDashboard(
+    val clientId: String,
+    val clientName: String,
+    val pairedAt: Long,
+    val lastSeen: Long,
+    val isActive: Boolean
+)
 
 /**
  * Application settings screen.
@@ -59,6 +77,106 @@ fun SettingsScreen(
     var serverPort by remember { mutableStateOf("8443") }
     var notificationsEnabled by remember { mutableStateOf(true) }
     var batteryOptimizationIgnored by remember { mutableStateOf(false) }
+
+    // ---- paired dashboards state (session management) ----
+    val scope = rememberCoroutineScope()
+    var dashboards by remember { mutableStateOf<List<PairedDashboard>>(emptyList()) }
+    var dashboardsLoading by remember { mutableStateOf(false) }
+    var dashboardsError by remember { mutableStateOf<String?>(null) }
+    var revokeAllArmed by remember { mutableStateOf(false) }
+
+    // Port used by the Artemis server (matches DashboardScreen).
+    val SERVER_PORT = 8443
+
+    fun fetchDashboards() {
+        scope.launch {
+            dashboardsLoading = true
+            dashboardsError = null
+            try {
+                val url = java.net.URL("http://127.0.0.1:$SERVER_PORT/api/v1/auth/clients")
+                val conn = url.openConnection() as java.net.HttpURLConnection
+                conn.connectTimeout = 3000
+                conn.readTimeout = 3000
+                conn.requestMethod = "GET"
+                if (conn.responseCode == 200) {
+                    val text = conn.inputStream.bufferedReader().readText()
+                    val arr = org.json.JSONObject(text).getJSONArray("clients")
+                    dashboards = (0 until arr.length()).map { i ->
+                        val o = arr.getJSONObject(i)
+                        PairedDashboard(
+                            clientId = o.getString("clientId"),
+                            clientName = o.optString("clientName", "Dashboard"),
+                            pairedAt = o.getLong("pairedAt"),
+                            lastSeen = o.optLong("lastSeen", 0L),
+                            isActive = o.optBoolean("isActive", true)
+                        )
+                    }
+                } else {
+                    dashboardsError = "Server returned HTTP ${conn.responseCode}"
+                }
+                conn.disconnect()
+            } catch (e: Exception) {
+                dashboardsError = "Server not reachable — is it running?"
+            }
+            dashboardsLoading = false
+        }
+    }
+
+    fun revokeDashboard(clientId: String) {
+        scope.launch {
+            try {
+                val url = java.net.URL("http://127.0.0.1:$SERVER_PORT/api/v1/auth/clients/$clientId")
+                val conn = url.openConnection() as java.net.HttpURLConnection
+                conn.connectTimeout = 3000
+                conn.readTimeout = 3000
+                conn.requestMethod = "DELETE"
+                conn.responseCode // trigger the request
+                conn.disconnect()
+            } catch (e: Exception) {
+                android.util.Log.w("Settings", "Revoke failed: ${e.message}")
+            }
+            fetchDashboards()
+        }
+    }
+
+    fun reviveDashboard(clientId: String) {
+        scope.launch {
+            try {
+                val url = java.net.URL("http://127.0.0.1:$SERVER_PORT/api/v1/auth/clients/$clientId/unrevoke")
+                val conn = url.openConnection() as java.net.HttpURLConnection
+                conn.connectTimeout = 3000
+                conn.readTimeout = 3000
+                conn.requestMethod = "POST"
+                conn.doOutput = true
+                conn.outputStream.write("{}".toByteArray())
+                conn.responseCode
+                conn.disconnect()
+            } catch (e: Exception) {
+                android.util.Log.w("Settings", "Revive failed: ${e.message}")
+            }
+            fetchDashboards()
+        }
+    }
+
+    fun revokeAllDashboards() {
+        scope.launch {
+            try {
+                val url = java.net.URL("http://127.0.0.1:$SERVER_PORT/api/v1/auth/clients")
+                val conn = url.openConnection() as java.net.HttpURLConnection
+                conn.connectTimeout = 3000
+                conn.readTimeout = 3000
+                conn.requestMethod = "DELETE"
+                conn.responseCode
+                conn.disconnect()
+            } catch (e: Exception) {
+                android.util.Log.w("Settings", "Revoke-all failed: ${e.message}")
+            }
+            fetchDashboards()
+        }
+    }
+
+    // Load the dashboard list when the screen opens.
+    LaunchedEffect(Unit) { fetchDashboards() }
 
     Scaffold(
         topBar = {
@@ -164,6 +282,87 @@ fun SettingsScreen(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                    }
+                }
+            }
+
+            // ---- paired dashboards section ----
+            item(key = "dashboards_section") {
+                SectionHeader(title = "Paired Dashboards", icon = Icons.Default.Person)
+            }
+
+            item(key = "dashboards_list") {
+                SettingsCard {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = if (dashboardsLoading) "Loading…" else "${dashboards.size} paired",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f)
+                        )
+                        IconButton(onClick = { fetchDashboards() }) {
+                            Icon(
+                                imageVector = Icons.Default.Refresh,
+                                contentDescription = "Refresh dashboards"
+                            )
+                        }
+                    }
+                    when {
+                        dashboardsError != null -> {
+                            Text(
+                                text = dashboardsError!!,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            OutlinedButton(onClick = { fetchDashboards() }) {
+                                Text("Retry")
+                            }
+                        }
+                        dashboards.isEmpty() && !dashboardsLoading -> {
+                            Text(
+                                text = "No paired dashboards yet. Pair one by entering the " +
+                                        "6-digit code shown on the dashboard screen.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        else -> {
+                            dashboards.forEachIndexed { index, dashboard ->
+                                PairedDashboardRow(
+                                    dashboard = dashboard,
+                                    onRevoke = { revokeDashboard(dashboard.clientId) },
+                                    onRevive = { reviveDashboard(dashboard.clientId) }
+                                )
+                                if (index < dashboards.size - 1) {
+                                    HorizontalDivider(
+                                        modifier = Modifier.padding(vertical = 4.dp),
+                                        color = MaterialTheme.colorScheme.outlineVariant
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Button(
+                                onClick = {
+                                    if (revokeAllArmed) {
+                                        revokeAllArmed = false
+                                        revokeAllDashboards()
+                                    } else {
+                                        revokeAllArmed = true
+                                    }
+                                },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.error,
+                                    contentColor = MaterialTheme.colorScheme.onError
+                                ),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(if (revokeAllArmed) "Tap again to confirm" else "Revoke All Dashboards")
+                            }
+                        }
                     }
                 }
             }
@@ -305,5 +504,71 @@ private fun AboutRow(
             style = MaterialTheme.typography.bodyMedium,
             fontWeight = FontWeight.Medium
         )
+    }
+}
+
+@Composable
+private fun PairedDashboardRow(
+    dashboard: PairedDashboard,
+    onRevoke: () -> Unit,
+    onRevive: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = dashboard.clientName,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = if (dashboard.isActive) "Active" else "Revoked",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (dashboard.isActive) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.error
+                    }
+                )
+            }
+            Text(
+                text = "Paired ${formatTimestamp(dashboard.pairedAt)} · " +
+                        "Last seen ${formatTimestamp(dashboard.lastSeen)}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        Spacer(modifier = Modifier.width(8.dp))
+        if (dashboard.isActive) {
+            IconButton(onClick = onRevoke) {
+                Icon(
+                    imageVector = Icons.Default.Delete,
+                    contentDescription = "Revoke ${dashboard.clientName}",
+                    tint = MaterialTheme.colorScheme.error
+                )
+            }
+        } else {
+            OutlinedButton(onClick = onRevive) {
+                Text("Revive")
+            }
+        }
+    }
+}
+
+private fun formatTimestamp(timestamp: Long): String {
+    if (timestamp <= 0L) return "never"
+    return try {
+        java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm").format(
+            java.time.Instant.ofEpochMilli(timestamp)
+                .atZone(java.time.ZoneId.systemDefault())
+        )
+    } catch (_: Exception) {
+        timestamp.toString()
     }
 }

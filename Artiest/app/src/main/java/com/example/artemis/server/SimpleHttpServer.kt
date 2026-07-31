@@ -5,6 +5,7 @@ import com.example.artemis.ArtemisApp
 import com.example.artemis.auth.AuthManager
 import com.example.artemis.auth.PairedClient
 import com.example.artemis.auth.PairingCode
+import com.example.artemis.auth.RefreshSessionResult
 import com.example.artemis.feature.CameraController
 import com.example.artemis.feature.DeviceInfoProvider
 import com.example.artemis.feature.LocationTracker
@@ -56,6 +57,16 @@ data class Route(
     val method: String,
     val pathPattern: String,
     val handler: (HttpRequest) -> HttpResponse
+)
+
+/**
+ * Per-IP pairing attempt state. Lockout grows exponentially with each
+ * failure past the threshold and resets on code rotation.
+ */
+data class PairingAttempt(
+    val fails: Int,
+    val firstFailAt: Long,
+    val lockedUntil: Long
 )
 
 // ============================================================
@@ -145,8 +156,14 @@ class SimpleHttpServer(
 
     // Rate limiting — per-IP fixed window. Loopback (phone UI) is exempt.
     private val requestLimiter = RateLimiter(maxRequests = 120, windowMs = 60_000L)
-    private val pairingFailures = mutableMapOf<String, Int>()  // ip -> consecutive fails
+    // Pairing brute-force defense: per-IP attempt tracking with exponential
+    // lockout. Counters reset on code rotation (max 5 minutes) and after a
+    // successful pairing.
+    private val pairingAttempts = mutableMapOf<String, PairingAttempt>()
     private val maxPairingFailures = 5
+    // Lockout ladder: 5th failure locks 1 min, then 2, 4 ... capped at the
+    // 5-minute rotation window (rotation clears everything anyway).
+    private val pairingBackoffBaseMs = 60_000L
 
     @Volatile
     var activeConnections: Int = 0
@@ -182,9 +199,13 @@ class SimpleHttpServer(
         // Auth status
         router.get("/api/v1/auth/status") { authStatusHandler(it) }
 
-        // Clients — every request must carry a valid token
-        router.get("/api/v1/auth/clients") { requireAuth(it) { req -> clientsListHandler(req) } }
-        router.delete("/api/v1/auth/clients/{id}") { requireAuth(it) { req -> clientRevokeHandler(req) } }
+        // Clients — management is available to authenticated dashboards AND to
+        // the phone UI itself (loopback, no token): the phone must be able to
+        // view/revoke its own pairings without holding a dashboard token.
+        router.get("/api/v1/auth/clients") { managementHandler(it) { req -> clientsListHandler(req) } }
+        router.delete("/api/v1/auth/clients/{id}") { managementHandler(it) { req -> clientRevokeHandler(req) } }
+        router.post("/api/v1/auth/clients/{id}/unrevoke") { managementHandler(it) { req -> clientUnrevokeHandler(req) } }
+        router.delete("/api/v1/auth/clients") { managementHandler(it) { req -> revokeAllHandler(req) } }
 
         // Device info
         router.get("/api/v1/device/info") { requireAuth(it) { req -> deviceInfoHandler(req) } }
@@ -230,6 +251,19 @@ class SimpleHttpServer(
         return handler(req)
     }
 
+    /**
+     * Client-management endpoints: authenticated dashboards pass a token; the
+     * phone itself (loopback) is trusted without one — the same trust model
+     * as pairing-code regeneration. Code running on the device already has
+     * full access to the device.
+     */
+    private fun managementHandler(req: HttpRequest, handler: (HttpRequest) -> HttpResponse): HttpResponse {
+        val remote = req.remoteAddress
+        val isLoopback = remote == "127.0.0.1" || remote == "::1" || remote.startsWith("127.")
+        if (isLoopback) return handler(req)
+        return requireAuth(req, handler)
+    }
+
     // ============================================================
     // Route handlers
     // ============================================================
@@ -261,6 +295,8 @@ class SimpleHttpServer(
         val fresh = authManager.generatePairingCode()
         pairingCode = fresh
         app.currentPairingCode = fresh
+        // A fresh code resets all pairing lockouts.
+        synchronized(pairingAttempts) { pairingAttempts.clear() }
         return jsonResponse(200, mapOf("status" to "rotated"))
     }
 
@@ -268,16 +304,27 @@ class SimpleHttpServer(
         val body = parseJsonObject(req.body) ?: return jsonResponse(400, mapOf("error" to "invalid_request", "message" to "Invalid JSON body"))
         val code = body["code"] ?: return jsonResponse(400, mapOf("error" to "invalid_request", "message" to "Missing pairing code"))
 
-        // Brute-force guard: max 5 failed attempts per IP per rotation window.
-        // Rotation clears the counters, so a lockout lasts at most 5 minutes.
+        // Brute-force guard: per-IP attempt tracking with exponential lockout.
+        // Threshold: 5 failed attempts; each subsequent failure extends the
+        // lockout (1 min, 2, 4 ... capped at the 5-minute rotation window).
+        // Code rotation clears all counters, so lockouts never persist past
+        // the current code's lifetime.
         val remote = req.remoteAddress
         val isLoopback = remote == "127.0.0.1" || remote == "::1" || remote.startsWith("127.")
-        val fails = synchronized(pairingFailures) { pairingFailures[remote] ?: 0 }
-        if (!isLoopback && fails >= maxPairingFailures) {
-            return jsonResponse(429, mapOf(
-                "error" to "pairing_locked",
-                "message" to "Too many failed attempts — code locked until rotation"
-            ))
+        if (!isLoopback) {
+            val attempt = synchronized(pairingAttempts) { pairingAttempts[remote] }
+            if (attempt != null) {
+                val now = System.currentTimeMillis()
+                if (now < attempt.lockedUntil) {
+                    val retryAfterSec = ((attempt.lockedUntil - now) / 1000).coerceAtLeast(1)
+                    Log.w("ArtemisServer", "Pairing locked for $remote until ${attempt.lockedUntil} ($retryAfterSec s)")
+                    return HttpResponse(
+                        429, contentType = "application/json",
+                        headers = mapOf("Retry-After" to retryAfterSec.toString()),
+                        body = """{"error":"pairing_locked","message":"Too many failed attempts — pairing locked, retry later"}"""
+                    )
+                }
+            }
         }
 
         // Check the pairing code (constant-time compare — no timing side channel)
@@ -285,8 +332,19 @@ class SimpleHttpServer(
         val codeMatches = currentCode != null &&
             MessageDigest.isEqual(currentCode.code.toByteArray(), code.toByteArray())
         if (!codeMatches) {
-            if (!isLoopback) synchronized(pairingFailures) {
-                pairingFailures[remote] = fails + 1
+            if (!isLoopback) synchronized(pairingAttempts) {
+                val prev = pairingAttempts[remote]
+                val fails = (prev?.fails ?: 0) + 1
+                val firstFailAt = prev?.firstFailAt ?: System.currentTimeMillis()
+                var lockedUntil = 0L
+                if (fails >= maxPairingFailures) {
+                    // Exponential: 1 min after the 5th failure, doubling, capped
+                    // at the rotation window.
+                    val backoffMs = pairingBackoffBaseMs shl (fails - maxPairingFailures).coerceAtMost(4)
+                    lockedUntil = firstFailAt + backoffMs.coerceAtMost(AuthManager.PAIRING_CODE_EXPIRY_MS)
+                    Log.w("ArtemisServer", "Pairing failure #$fails for $remote — locked until $lockedUntil")
+                }
+                pairingAttempts[remote] = PairingAttempt(fails, firstFailAt, lockedUntil)
             }
             return jsonResponse(401, mapOf("error" to "pairing_failed", "message" to "Invalid pairing code"))
         }
@@ -294,11 +352,18 @@ class SimpleHttpServer(
             return jsonResponse(401, mapOf("error" to "pairing_failed", "message" to "Pairing code expired"))
         }
 
-        // Success — reset this IP's failure counter
-        synchronized(pairingFailures) { pairingFailures.remove(remote) }
+        // Success — clear this IP's attempt tracking
+        synchronized(pairingAttempts) { pairingAttempts.remove(remote) }
 
         val deviceId = try { android.os.Build.getSerial() } catch (_: Exception) { android.os.Build.FINGERPRINT }
-        val clientId = "client_${System.currentTimeMillis()}"
+        // Unpredictable client ID: 12 random bytes, base64url. The previous
+        // millisecond-based ID was guessable and could collide.
+        val clientIdBytes = ByteArray(12).also { secureRandom.nextBytes(it) }
+        val clientId = "client_" + android.util.Base64.encodeToString(
+            clientIdBytes, android.util.Base64.URL_SAFE or android.util.Base64.NO_PADDING or android.util.Base64.NO_WRAP
+        )
+        // Optional human-friendly device name sent by the dashboard on pairing.
+        val clientName = body["name"]?.takeIf { it.isNotBlank() }?.take(64) ?: "Dashboard"
 
         val token = runBlocking {
             authManager.issueToken(
@@ -313,7 +378,7 @@ class SimpleHttpServer(
         authManager.rememberPairedClient(
             PairedClient(
                 clientId = clientId,
-                clientName = "Web Dashboard",
+                clientName = clientName,
                 permissionScope = AuthManager.SCOPE_ADMIN,
                 pairedAt = System.currentTimeMillis(),
                 lastSeen = System.currentTimeMillis(),
@@ -322,6 +387,15 @@ class SimpleHttpServer(
         )
 
         connectedClients++
+
+        // Rotate the code immediately after a successful pairing so a code
+        // that has been observed once (on screen, by anyone nearby) can never
+        // pair a second dashboard. The dashboard remains paired via tokens.
+        val fresh = authManager.generatePairingCode()
+        pairingCode = fresh
+        app.currentPairingCode = fresh
+        synchronized(pairingAttempts) { pairingAttempts.clear() }
+        Log.i("ArtemisServer", "Pairing succeeded for $clientName ($clientId) — code rotated")
 
         return jsonResponse(200, mapOf(
             "token" to token,
@@ -335,28 +409,48 @@ class SimpleHttpServer(
         val body = parseJsonObject(req.body) ?: return jsonResponse(400, mapOf("error" to "invalid_request", "message" to "Invalid JSON body"))
         val refreshToken = body["refreshToken"] ?: return jsonResponse(400, mapOf("error" to "invalid_request", "message" to "Missing refreshToken"))
 
-        val result = runBlocking { authManager.validateRefreshToken(refreshToken) }
-        if (result.isFailure) {
-            return jsonResponse(401, mapOf("error" to "invalid_token", "message" to "Refresh token is invalid or expired"))
-        }
-
-        val clientId = result.getOrThrow()
         val deviceId = try { android.os.Build.getSerial() } catch (_: Exception) { android.os.Build.FINGERPRINT }
 
-        val newToken = runBlocking {
-            authManager.issueToken(
-                deviceId = deviceId,
-                clientId = clientId,
-                scope = AuthManager.SCOPE_ADMIN
-            )
+        when (val result = runBlocking { authManager.refreshSession(refreshToken) }) {
+            is RefreshSessionResult.Ok -> {
+                // Rotation happened atomically: the presented refresh token is
+                // now superseded and the client has a fresh one.
+                val newToken = runBlocking {
+                    authManager.issueToken(
+                        deviceId = deviceId,
+                        clientId = result.clientId,
+                        scope = AuthManager.SCOPE_ADMIN
+                    )
+                }
+                return jsonResponse(200, mapOf(
+                    "token" to newToken,
+                    "refreshToken" to result.newRefreshToken,
+                    "expiresAt" to (System.currentTimeMillis() + AuthManager.TOKEN_EXPIRY_MS)
+                ))
+            }
+            is RefreshSessionResult.ReplayDetected -> {
+                // Reuse of a rotated refresh token after the grace window, or
+                // reuse of a revoked token. The client was revoked — full
+                // re-pairing required. (error code lets the dashboard
+                // distinguish this from a benign expiry)
+                return jsonResponse(401, mapOf(
+                    "error" to "replay_detected",
+                    "message" to "Refresh token reuse detected — device revoked, re-pair required"
+                ))
+            }
+            is RefreshSessionResult.Expired -> {
+                return jsonResponse(401, mapOf(
+                    "error" to "invalid_token",
+                    "message" to "Refresh token expired — re-pair required"
+                ))
+            }
+            RefreshSessionResult.Invalid -> {
+                return jsonResponse(401, mapOf(
+                    "error" to "invalid_token",
+                    "message" to "Refresh token is invalid"
+                ))
+            }
         }
-        val newRefreshToken = runBlocking { authManager.createRefreshToken(clientId) }
-
-        return jsonResponse(200, mapOf(
-            "token" to newToken,
-            "refreshToken" to newRefreshToken,
-            "expiresAt" to (System.currentTimeMillis() + AuthManager.TOKEN_EXPIRY_MS)
-        ))
     }
 
     private fun authStatusHandler(req: HttpRequest): HttpResponse {
@@ -402,6 +496,26 @@ class SimpleHttpServer(
             return jsonResponse(404, mapOf("error" to "not_found", "message" to "Client not found"))
         }
         return jsonResponse(200, mapOf("status" to "revoked", "clientId" to id))
+    }
+
+    /** Recovery path for an accidental revoke — reactivates a client. */
+    private fun clientUnrevokeHandler(req: HttpRequest): HttpResponse {
+        val id = req.pathParams["id"]
+        if (id == null) {
+            return jsonResponse(400, mapOf("error" to "bad_request", "message" to "Missing client ID"))
+        }
+        val revived = authManager.unrevokeClient(id)
+        if (!revived) {
+            return jsonResponse(404, mapOf("error" to "not_found", "message" to "Client not found"))
+        }
+        return jsonResponse(200, mapOf("status" to "revived", "clientId" to id))
+    }
+
+    /** Revoke every paired dashboard (lost/stolen phone, "revoke all"). */
+    private fun revokeAllHandler(req: HttpRequest): HttpResponse {
+        authManager.revokeAllClients()
+        Log.w("ArtemisServer", "All paired dashboards revoked")
+        return jsonResponse(200, mapOf("status" to "revoked", "count" to 0))
     }
 
     private fun deviceInfoHandler(req: HttpRequest): HttpResponse {
@@ -639,7 +753,7 @@ class SimpleHttpServer(
                     val fresh = authManager.generatePairingCode()
                     pairingCode = fresh
                     app.currentPairingCode = fresh
-                    synchronized(pairingFailures) { pairingFailures.clear() }
+                    synchronized(pairingAttempts) { pairingAttempts.clear() }
                     Log.i("ArtemisServer", "Pairing code rotated (new code shown on screen only)")
                 }
             }
@@ -668,17 +782,20 @@ class SimpleHttpServer(
                                 // Upgrade to TLS. Plaintext talkers on the network
                                 // fail the handshake and get nothing but a closed
                                 // connection — exactly the "garbage to others" goal.
+                                client.soTimeout = 15000 // fail slow handshakes fast
                                 val ssl = sslSocketFactory!!.createSocket(
                                     client, client.inetAddress.hostAddress, port, true
                                 ) as SSLSocket
-                                ssl.useClientMode = false
+                                // TLS 1.3 preferred; restricted TLS 1.2 fallback
+                                // (ECDHE + AEAD only); server cipher preference.
+                                TlsManager.configureSocket(ssl)
                                 ssl.startHandshake()
                                 handleConnection(ssl)
                             } else {
                                 handleConnection(client)
                             }
                         } catch (e: Exception) {
-                            Log.e("ArtemisServer", "Error handling connection: ${e.message}", e)
+                            Log.e("ArtemisServer", "Error handling connection: ${e.message}")
                         } finally {
                             activeConnections--
                         }
@@ -737,9 +854,11 @@ class SimpleHttpServer(
         } catch (e: Exception) {
             Log.e("ArtemisServer", "Connection handler error: ${e.message}")
             try {
+                // Never echo exception details to the client — they can leak
+                // stack traces, file paths and internals to network peers.
                 sendHttpResponse(client.getOutputStream(),
                     HttpResponse(500, contentType = "application/json",
-                        body = """{"error":"internal_error","message":"${e.message?.replace("\"", "\\\"") ?: "Unknown error"}"""))
+                        body = """{"error":"internal_error","message":"Internal server error"}"""))
             } catch (_: Exception) {}
         } finally {
             try {

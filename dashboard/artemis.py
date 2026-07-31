@@ -34,6 +34,7 @@ Usage:
 
 import argparse
 import hashlib
+import hmac
 import json
 import os
 import socket
@@ -89,11 +90,26 @@ def _decrypt(blob):
 # ─── Configuration ───────────────────────────────────────────────────────────
 
 def load_tokens():
-    """Load saved tokens from config file."""
+    """Load saved tokens from config file.
+
+    New format: {host: {"token": ..., "refresh_token": ..., "expires_at": ...}}
+    Legacy format: {host: "token-string"} — migrated in place.
+    """
     if TOKEN_FILE.exists():
         try:
             raw = json.loads(TOKEN_FILE.read_text())
-            return {host: _decrypt(tok) for host, tok in raw.items()}
+            out = {}
+            for host, val in raw.items():
+                if isinstance(val, dict):
+                    tok = _decrypt(val.get("token", ""))
+                    out[host] = {
+                        "token": tok,
+                        "refresh_token": _decrypt(val.get("refresh_token", "")),
+                        "expires_at": val.get("expires_at", 0.0),
+                    }
+                else:
+                    out[host] = {"token": _decrypt(val), "refresh_token": "", "expires_at": 0.0}
+            return out
         except (json.JSONDecodeError, PermissionError):
             return {}
     return {}
@@ -102,21 +118,42 @@ def load_tokens():
 def save_tokens(tokens):
     """Save tokens to config file (encrypted at rest)."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    encrypted = {host: _encrypt(tok) for host, tok in tokens.items()}
+    encrypted = {
+        host: {
+            "token": _encrypt(v.get("token", "")),
+            "refresh_token": _encrypt(v.get("refresh_token", "")),
+            "expires_at": v.get("expires_at", 0.0),
+        }
+        for host, v in tokens.items()
+    }
     TOKEN_FILE.write_text(json.dumps(encrypted, indent=2))
 
 
 def get_saved_token(host):
-    """Get saved token for a host."""
+    """Get saved access token for a host."""
     tokens = load_tokens()
-    return tokens.get(host)
+    return tokens.get(host, {}).get("token")
 
 
-def set_saved_token(host, token):
-    """Save token for a host."""
+def set_saved_token(host, token, refresh_token="", expires_at=0.0):
+    """Save token set for a host."""
     tokens = load_tokens()
-    tokens[host] = token
+    tokens[host] = {
+        "token": token,
+        "refresh_token": refresh_token,
+        "expires_at": expires_at,
+    }
     save_tokens(tokens)
+
+
+def forget_host(host, port=DEFAULT_PORT):
+    """Delete the trust relationship for a host: token, refresh token, pin."""
+    tokens = load_tokens()
+    tokens.pop(host, None)
+    save_tokens(tokens)
+    pins = _load_known_hosts()
+    pins.pop(f"{host}:{port}", None)
+    _save_known_hosts(pins)
 
 
 # ─── Network / Discovery ────────────────────────────────────────────────────
@@ -170,10 +207,16 @@ def discover_devices(timeout=5):
 # ─── HTTPS Client ────────────────────────────────────────────────────────────
 
 def _create_ssl_context():
-    """Create SSL context that accepts self-signed certs (pin-checked by hand)."""
+    """TLS >= 1.2 (1.3 by default), ECDHE+AEAD ciphers only; self-signed
+    certs are accepted and verified by TOFU pinning by hand."""
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    try:
+        ctx.set_ciphers("ECDHE+AESGCM:ECDHE+CHACHA20")
+    except ssl.SSLError:
+        pass
     return ctx
 
 
@@ -215,28 +258,28 @@ def _peer_pin(resp):
 
 
 def api_request(host, path, method="GET", data=None, token=None, port=DEFAULT_PORT):
-    """Make HTTPS request to Artemis server with TOFU cert pinning."""
+    """Make HTTPS request to Artemis server with TOFU cert pinning.
+
+    On 401 with a saved refresh token, transparently refreshes the token
+    (rotation happens on the phone) and retries once — the user never notices.
+    On a cert-pin mismatch the stored trust (token + pin) is deleted.
+    """
     url = f"https://{host}:{port}{path}"
 
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-
-    body = json.dumps(data).encode() if data else None
-
-    req = urllib.request.Request(url, data=body, headers=headers, method=method)
-
-    try:
+    def _do_request(auth_token):
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        if auth_token:
+            headers["Authorization"] = f"Bearer {auth_token}"
+        body = json.dumps(data).encode() if data else None
+        req = urllib.request.Request(url, data=body, headers=headers, method=method)
         ctx = _create_ssl_context()
         with urllib.request.urlopen(req, context=ctx, timeout=10) as resp:
-            # TOFU pinning: verify the presented cert matches what we pinned
-            # on first contact. Refuse on mismatch (possible MITM or reinstall).
             observed = _peer_pin(resp)
             expected = _pin_for(host, port)
-            if expected and observed and expected != observed:
+            if expected and observed and not hmac.compare_digest(expected, observed):
                 return {"error": "cert_mismatch",
                         "message": "Device TLS certificate changed — possible "
                                    "MITM or reinstall. Forget and re-pair."}
@@ -244,7 +287,36 @@ def api_request(host, path, method="GET", data=None, token=None, port=DEFAULT_PO
                 _remember_pin(host, port, observed)
             raw = resp.read().decode()
             return json.loads(raw)
+
+    try:
+        return _do_request(token)
     except urllib.error.HTTPError as e:
+        # 401 + saved refresh token -> refresh and retry once.
+        if e.code == 401:
+            saved = load_tokens().get(host, {})
+            rt = saved.get("refresh_token")
+            if rt:
+                try:
+                    status, j = _refresh_token(host, rt, port)
+                    if status == 200 and j and j.get("token"):
+                        set_saved_token(
+                            host, j["token"],
+                            refresh_token=j.get("refreshToken", ""),
+                            expires_at=float(j.get("expiresAt") or 0) / 1000.0,
+                        )
+                        return _do_request(j["token"])
+                    if (j or {}).get("error") == "replay_detected":
+                        forget_host(host, port)
+                        print(f"\n⚠ REFRESH TOKEN REPLAY DETECTED by {host} — "
+                              f"device revoked us. Re-pair to continue.", flush=True)
+                        return {"error": "replay_detected",
+                                "message": "Device revoked this dashboard (refresh-token replay). Re-pair."}
+                    forget_host(host, port)
+                    return {"error": "refresh_failed",
+                            "message": "Refresh token rejected — re-pair the device.",
+                            "status": status}
+                except Exception as ex:
+                    return {"error": f"refresh_error: {ex}"}
         try:
             err = json.loads(e.read().decode())
             return {"error": err.get("error", str(e)), "status": e.code}
@@ -256,6 +328,32 @@ def api_request(host, path, method="GET", data=None, token=None, port=DEFAULT_PO
         return {"error": f"SSL error: {e}"}
     except Exception as e:
         return {"error": str(e)}
+
+
+def _refresh_token(host, refresh_token, port=DEFAULT_PORT):
+    """POST /api/v1/auth/token — returns (status, json)."""
+    url = f"https://{host}:{port}/api/v1/auth/token"
+    body = json.dumps({"refreshToken": refresh_token}).encode()
+    req = urllib.request.Request(
+        url, data=body, method="POST",
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+    )
+    ctx = _create_ssl_context()
+    try:
+        with urllib.request.urlopen(req, context=ctx, timeout=10) as resp:
+            observed = _peer_pin(resp)
+            expected = _pin_for(host, port)
+            if expected and observed and not hmac.compare_digest(expected, observed):
+                return 0, {"error": "cert_mismatch"}
+            raw = resp.read().decode()
+            return resp.status, json.loads(raw)
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read().decode())
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return e.code, {}
+    except Exception as e:
+        return 0, {"error": str(e)}
 
 
 # ─── Pairing Flow ────────────────────────────────────────────────────────────
@@ -297,14 +395,18 @@ def cmd_pair(args):
     
     token = pair_resp.get("token")
     device_id = pair_resp.get("deviceId", "unknown")
-    
+
     print(f"✓ Paired successfully with device: {device_id}")
     print(f"  Token: {token[:20]}...{token[-10:] if token else ''}")
-    
+
     if args.save:
-        set_saved_token(host, token)
-        print(f"✓ Token saved for {host}")
-    
+        set_saved_token(
+            host, token,
+            refresh_token=pair_resp.get("refreshToken", ""),
+            expires_at=float(pair_resp.get("expiresAt") or 0) / 1000.0,
+        )
+        print(f"✓ Token + refresh token saved for {host} (auto-refreshes)")
+
     return token
 
 
@@ -424,10 +526,13 @@ def cmd_camera(args):
         # Optionally download
         if args.download:
             print(f"  Downloading...")
-            photo_url = f"http://{args.host}:{port}{result.get('url', '')}"
+            photo_url = f"https://{args.host}:{port}{result.get('url', '')}"
             try:
                 ctx = _create_ssl_context()
-                with urllib.request.urlopen(photo_url, context=ctx) as resp:
+                dl_req = urllib.request.Request(photo_url)
+                if token:
+                    dl_req.add_header("Authorization", f"Bearer {token}")
+                with urllib.request.urlopen(dl_req, context=ctx) as resp:
                     data = resp.read()
                 fname = f"artemis_photo_{result.get('id', 'unknown')}.jpg"
                 Path(fname).write_bytes(data)

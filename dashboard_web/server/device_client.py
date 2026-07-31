@@ -1,5 +1,6 @@
 """HTTP client for Artemis phone devices — TLS with TOFU cert pinning."""
 import hashlib
+import hmac
 import json
 import socket
 import ssl
@@ -15,6 +16,8 @@ class ArtemisDevice:
     host: str
     port: int = 8443
     token: str | None = None
+    refresh_token: str = ""       # 30-day rotating refresh token
+    expires_at: float = 0.0       # epoch seconds when `token` expires
     device_id: str = ""
     name: str = ""
     paired: bool = False
@@ -44,6 +47,20 @@ def _pin_of(peer_der: bytes) -> str:
     return "SHA256:" + hashlib.sha256(peer_der).hexdigest()
 
 
+def _make_tls_context() -> ssl.SSLContext:
+    """Hardened TLS context: TLS >= 1.2 (1.3 negotiated by default),
+    ECDHE + AEAD cipher suites only (forward secrecy, no CBC/RSA kx)."""
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE  # self-signed device cert; we pin by SHA-256
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    try:
+        ctx.set_ciphers("ECDHE+AESGCM:ECDHE+CHACHA20")
+    except ssl.SSLError:
+        pass  # platform without the suite set — defaults still exclude weak
+    return ctx
+
+
 def _http_request(
     host: str,
     method: str,
@@ -61,9 +78,7 @@ def _http_request(
       - cert_fp provided    -> reject unless the peer cert matches the pin
     Returns (status, json, observed_pin).
     """
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE  # self-signed device cert; we pin by SHA-256
+    ctx = _make_tls_context()
 
     s = socket.socket()
     s.settimeout(timeout)
@@ -78,7 +93,7 @@ def _http_request(
 
         peer_der = tls.getpeercert(binary_form=True)
         observed_pin = _pin_of(peer_der) if peer_der else ""
-        if cert_fp and observed_pin and cert_fp != observed_pin:
+        if cert_fp and observed_pin and not hmac.compare_digest(cert_fp, observed_pin):
             return (0, {
                 "error": "cert_mismatch",
                 "message": "Device TLS certificate does not match stored pin — "
@@ -139,12 +154,27 @@ def health(host: str, port: int = 8443, timeout: float = 5.0,
 
 
 def pair(host: str, code: str, port: int = 8443,
-         cert_fp: str | None = None) -> tuple[dict | None, str]:
+         cert_fp: str | None = None, name: str = "Web Dashboard") -> tuple[dict | None, str]:
     _, j, pin = _http_request(
         host, "POST", "/api/v1/auth/pair",
-        body={"code": code}, port=port, cert_fp=cert_fp,
+        body={"code": code, "name": name[:64]}, port=port, cert_fp=cert_fp,
     )
     return j, pin
+
+
+def refresh(host: str, refresh_token: str, port: int = 8443,
+            cert_fp: str | None = None) -> tuple[int, dict | None, str]:
+    """POST /api/v1/auth/token — rotate the refresh token, get a new pair.
+
+    Returns (status, json, observed_pin). Status 401 with error
+    "replay_detected" means the token was reused after rotation (theft
+    signal) and the device has been revoked — re-pairing is required.
+    """
+    status, j, pin = _http_request(
+        host, "POST", "/api/v1/auth/token",
+        body={"refreshToken": refresh_token}, port=port, cert_fp=cert_fp,
+    )
+    return status, j, pin
 
 
 def device_info(host: str, token: str, port: int = 8443,

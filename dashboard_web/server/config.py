@@ -34,9 +34,11 @@ DEVICES_FILE = CONFIG_DIR / "devices.json"
 
 # ---------------------------------------------------------------------------
 # Token encryption at rest.
-# The bearer token for each phone is a long-lived credential — never store it
-# in plaintext. We encrypt the token field with a Fernet key kept in a
-# 0600-perm file next to the registry.
+# The bearer/refresh tokens for each phone are credentials — never store them
+# in plaintext. We encrypt with a Fernet key kept in a 0600-perm file next to
+# the registry. The TLS cert pin is also encrypted: while the pin is not
+# secret, encrypting it prevents an attacker with read-only file access from
+# swapping in their own pin to enable MITM during the next refresh.
 # ---------------------------------------------------------------------------
 
 KEY_FILE = CONFIG_DIR / "dashboard_store.key"
@@ -77,30 +79,37 @@ def decrypt_token(blob: str) -> str:
     return blob  # legacy plaintext
 
 
+# Fields that must never be persisted in plaintext.
+ENCRYPTED_FIELDS = ("token", "refresh_token", "cert_fp")
+
+
 def load_devices():
     if DEVICES_FILE.exists():
         try:
             raw = json.loads(DEVICES_FILE.read_text())
         except Exception:
             raw = {}
-        # Decrypt token fields on read
+        # Decrypt secret fields on read
         for data in raw.values():
-            if isinstance(data, dict) and data.get("token"):
-                data["token"] = decrypt_token(data["token"])
+            if isinstance(data, dict):
+                for f in ENCRYPTED_FIELDS:
+                    if data.get(f):
+                        data[f] = decrypt_token(data[f])
         return raw
     return {}
 
 
 def save_devices(devices):
-    # Encrypt token fields on write — never persist a plaintext token.
+    # Encrypt secret fields on write — never persist them in plaintext.
     # Copy first: the input may be the live registry's __dict__ objects,
     # and mutating them in place would swap the working token for ciphertext.
     out = {}
     for key, data in devices.items():
         if isinstance(data, dict):
             copy = dict(data)
-            if copy.get("token"):
-                copy["token"] = encrypt_token(copy["token"])
+            for f in ENCRYPTED_FIELDS:
+                if copy.get(f):
+                    copy[f] = encrypt_token(copy[f])
             out[key] = copy
         else:
             out[key] = data

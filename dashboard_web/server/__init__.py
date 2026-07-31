@@ -1,4 +1,5 @@
 """FastAPI app — Artemis Web Dashboard backend."""
+import socket
 import time
 import json
 from pathlib import Path
@@ -17,7 +18,7 @@ from .device_manager import registry
 
 # ---------- App ----------
 
-app = FastAPI(title="Artemis Dashboard", version="1.3.0")
+app = FastAPI(title="Artemis Dashboard", version="1.5.0")
 templates = Jinja2Templates(directory=Path(__file__).parent.parent / "templates")
 
 # ---------- Models ----------
@@ -33,6 +34,34 @@ class PairRequest(BaseModel):
 class RefreshRequest(BaseModel):
     host: str
     port: int = 8443
+
+# ---------- Helpers ----------
+
+def _paired_device_or_error(key: str):
+    """Resolve a paired device, refreshing its access token before use.
+
+    Returns (dev, None) on success, or (None, error_dict) with a
+    machine-readable error when the trust relationship is gone.
+    """
+    dev = registry.get_device(key)
+    if not dev:
+        return None, {"error": "not_found", "message": "Device not found"}
+    if not dev.paired:
+        return None, {"error": "not_paired", "message": "Device is not paired"}
+    ok, detail = registry.ensure_device_token(key)
+    if not ok:
+        if detail in ("replay_detected", "invalid_token", "cert_mismatch"):
+            return None, {
+                "error": detail,
+                "message": "Trust relationship was deleted by the device — re-pair to continue.",
+            }
+        if detail == "no_refresh_token":
+            return None, {
+                "error": "no_refresh_token",
+                "message": "Paired before refresh-token support — re-pair once to upgrade (UX unchanged afterwards).",
+            }
+        return None, {"error": "token_unavailable", "message": detail}
+    return registry.get_device(key), None
 
 # ---------- Auth Routes ----------
 
@@ -81,9 +110,11 @@ async def list_devices(_=Depends(require_login)):
 async def pair_device(req: PairRequest, _=Depends(require_login)):
     # TOFU: no stored pin yet -> accept whatever cert the phone presents
     # and pin it. If a pin exists and mismatches, pair() refuses.
-    dev = registry.get_device(f"{req.host}:{req.port}")
+    key = f"{req.host}:{req.port}"
+    dev = registry.get_device(key)
     known_pin = dev.cert_fp if dev else None
-    result, pin = pair(req.host, req.code, req.port, cert_fp=known_pin or None)
+    result, pin = pair(req.host, req.code, req.port,
+                       cert_fp=known_pin or None, name=socket.gethostname())
     if not result or "token" not in result:
         if result and result.get("error") == "cert_mismatch":
             return {"error": "cert_mismatch",
@@ -92,10 +123,14 @@ async def pair_device(req: PairRequest, _=Depends(require_login)):
         return {"error": "pairing_failed"}
     if not known_pin and pin:
         known_pin = pin
+    expires_ms = result.get("expiresAt") or 0
     device = registry.add_device(
         host=req.host, port=req.port,
         token=result["token"],
+        refresh_token=result.get("refreshToken", ""),
+        expires_at=expires_ms / 1000.0 if expires_ms else 0.0,
         device_id=result.get("deviceId", ""),
+        name=socket.gethostname(),
         paired=True,
         cert_fp=known_pin or "",
     )
@@ -113,6 +148,9 @@ async def refresh_device(req: RefreshRequest, _=Depends(require_login)):
         if not dev.cert_fp and pin:
             updates["cert_fp"] = pin  # TOFU pin capture
         registry.update_device(key, **updates)
+        # Keep the token alive so the pairing never lapses.
+        if dev.paired:
+            registry.ensure_device_token(key)
         return {"ok": True, "health": info}
     return {"ok": False, "error": info.get("error", "unreachable")}
 
@@ -135,38 +173,46 @@ async def device_health_route(host: str, port: int, _=Depends(require_login)):
 @app.get("/api/device/{host}/{port}/info")
 async def device_info_route(host: str, port: int, _=Depends(require_login)):
     key = f"{host}:{port}"
-    dev = registry.get_device(key)
-    if not dev or not dev.token:
-        raise HTTPException(404, "Device not found or not paired")
-    info, _ = device_info(dev.host, dev.token, dev.port, cert_fp=dev.cert_fp or None)
+    dev, err = _paired_device_or_error(key)
+    if err:
+        return err
+    if dev is None:
+        return {"error": "not_found", "message": "Device not found"}
+    info, _ = device_info(dev.host, dev.token or "", dev.port, cert_fp=dev.cert_fp or None)
     return info
 
 @app.get("/api/device/{host}/{port}/location")
 async def device_location_route(host: str, port: int, _=Depends(require_login)):
     key = f"{host}:{port}"
-    dev = registry.get_device(key)
-    if not dev or not dev.token:
-        raise HTTPException(404, "Device not found or not paired")
-    info, _ = location_current(dev.host, dev.token, dev.port, cert_fp=dev.cert_fp or None)
+    dev, err = _paired_device_or_error(key)
+    if err:
+        return err
+    if dev is None:
+        return {"error": "not_found", "message": "Device not found"}
+    info, _ = location_current(dev.host, dev.token or "", dev.port, cert_fp=dev.cert_fp or None)
     return info
 
 @app.get("/api/device/{host}/{port}/cameras")
 async def device_cameras_route(host: str, port: int, _=Depends(require_login)):
     key = f"{host}:{port}"
-    dev = registry.get_device(key)
-    if not dev or not dev.token:
-        raise HTTPException(404, "Device not found or not paired")
-    info, _ = camera_list(dev.host, dev.token, dev.port, cert_fp=dev.cert_fp or None)
+    dev, err = _paired_device_or_error(key)
+    if err:
+        return err
+    if dev is None:
+        return {"error": "not_found", "message": "Device not found"}
+    info, _ = camera_list(dev.host, dev.token or "", dev.port, cert_fp=dev.cert_fp or None)
     return info
 
 @app.post("/api/device/{host}/{port}/camera/capture")
 async def device_camera_capture(host: str, port: int, camera_id: str,
                                  _=Depends(require_login)):
     key = f"{host}:{port}"
-    dev = registry.get_device(key)
-    if not dev or not dev.token:
-        raise HTTPException(404, "Device not found or not paired")
-    info, _ = camera_capture(dev.host, dev.token, camera_id, dev.port,
+    dev, err = _paired_device_or_error(key)
+    if err:
+        return err
+    if dev is None:
+        return {"error": "not_found", "message": "Device not found"}
+    info, _ = camera_capture(dev.host, dev.token or "", camera_id, dev.port,
                              cert_fp=dev.cert_fp or None)
     return info
 

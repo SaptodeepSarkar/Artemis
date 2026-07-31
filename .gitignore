@@ -16,6 +16,10 @@ bin/
 gen/
 out/
 
+# Python
+__pycache__/
+*.pyc
+
 # IDE
 .idea/
 *.iml

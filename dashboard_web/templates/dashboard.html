@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Artemis Labs | Device Command</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&amp;family=JetBrains+Mono:wght@400;700&amp;family=Crimson+Pro:wght@400&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<script id="tailwind-config">
+        tailwind.config = {
+          darkMode: "class",
+          theme: {
+            extend: {
+              "colors": {
+                      "on-tertiary-container": "#cbe5ff",
+                      "on-surface": "#e4e1e9",
+                      "surface": "#131318",
+                      "surface-container-low": "#1b1b20",
+                      "error-container": "#93000a",
+                      "outline": "#a88a88",
+                      "primary-container": "#b8323a",
+                      "surface-container-high": "#2a292f",
+                      "outline-variant": "#594140",
+                      "on-tertiary": "#003350",
+                      "surface-container": "#1f1f25",
+                      "secondary-fixed-dim": "#c5c6cd",
+                      "on-error": "#690005",
+                      "inverse-on-surface": "#303036",
+                      "on-primary": "#680011",
+                      "surface-container-lowest": "#0e0e13",
+                      "on-tertiary-fixed-variant": "#1d4a6a",
+                      "background": "#131318",
+                      "secondary-container": "#47494f",
+                      "surface-tint": "#ffb3b1",
+                      "on-secondary-container": "#b7b8bf",
+                      "primary-fixed-dim": "#ffb3b1",
+                      "secondary-fixed": "#e1e2e9",
+                      "on-secondary-fixed-variant": "#44474c",
+                      "secondary": "#c5c6cd",
+                      "tertiary-container": "#3e6889",
+                      "on-secondary-fixed": "#191c21",
+                      "on-secondary": "#2e3036",
+                      "tertiary": "#a2cbf1",
+                      "surface-variant": "#35343a",
+                      "surface-container-highest": "#35343a",
+                      "primary-fixed": "#ffdad8",
+                      "inverse-primary": "#b02c35",
+                      "error": "#ffb4ab",
+                      "on-error": "#690005",
+                      "tertiary-fixed": "#cce5ff",
+                      "outline": "#a88a88",
+                      "on-surface-variant": "#e0bfbd",
+                      "on-primary-fixed-variant": "#8e1020",
+                      "on-primary-container": "#ffd9d7",
+                      "primary": "#ffb3b1",
+                      "on-tertiary-fixed": "#001e31",
+                      "on-primary-fixed": "#410007",
+                      "void-black": "#0A0A0F",
+                      "moon-silver": "#C8C9D0",
+                      "hunt-crimson": "#B8323A",
+                      "pyrenees-frost": "#7BA4C8",
+                      "maquis-green": "#4A7C59",
+                      "gestapo-amber": "#D4A03D",
+              },
+              "borderRadius": {
+                      "DEFAULT": "0.25rem",
+                      "lg": "0.5rem",
+                      "xl": "0.75rem",
+                      "full": "9999px"
+              },
+              "fontFamily": {
+                      "headline": ["Space Grotesk"],
+                      "display": ["Space Grotesk"],
+                      "body": ["Space Grotesk"],
+                      "label": ["Jetbrains Mono"]
+              }
+      },
+          },
+        }
+      </script>
+<style>
+        body { background-color: #0A0A0F; color: #C8C9D0; }
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: #0A0A0F; }
+        ::-webkit-scrollbar-thumb { background: #35343a; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #594140; }
+        .data-row { display: flex; justify-content: space-between; border-bottom: 1px solid rgba(200,201,208,0.1); padding-bottom: 0.5rem; }
+        .data-row span:first-child { color: rgba(200,201,208,0.5); }
+        .data-row span:last-child { color: #7BA4C8; text-align: right; }
+    </style>
+</head>
+<body class="font-body antialiased min-h-screen flex selection:bg-hunt-crimson selection:text-white">
+<div class="flex w-full min-h-screen">
+<!-- Sidebar -->
+<aside class="bg-surface-elevation border-r border-outline-variant h-full w-64 hidden lg:flex flex-col py-8 z-40 relative flex-shrink-0">
+<div class="px-8 mb-12">
+<div class="flex items-center gap-4 mb-2">
+<div class="w-10 h-10 rounded-full border border-moon-silver/30 overflow-hidden flex-shrink-0 flex items-center justify-center bg-void-black">
+<svg width="28" height="28" viewBox="0 0 48 48" fill="none">
+    <circle cx="24" cy="24" r="22" stroke="#B8323A" stroke-width="2"/>
+    <circle cx="24" cy="24" r="16" stroke="#B8323A" stroke-width="1" stroke-dasharray="3 3"/>
+    <path d="M24 8 L24 40 M8 24 L40 24" stroke="#C8C9D0" stroke-width="1.5"/>
+    <circle cx="24" cy="24" r="4" fill="#B8323A"/>
+</svg>
+</div>
+<div>
+<h1 class="font-headline text-[18px] font-semibold text-on-surface leading-none mb-1" id="deviceTitle">DEVICE_CMD</h1>
+<p class="font-label text-[10px] font-bold text-moon-silver/60 tracking-[0.1em]">CLEARANCE: LEVEL 5</p>
+</div>
+</div>
+</div>
+<nav class="flex-1 flex flex-col gap-1 px-4">
+<a class="group flex items-center gap-4 px-4 py-3 rounded text-on-secondary-container opacity-70 hover:bg-surface-container hover:text-on-surface transition-all duration-200" href="/">
+<span class="material-symbols-outlined group-hover:translate-x-1 duration-200">devices</span>
+<span class="font-label text-label-caps text-xs font-bold tracking-[0.1em] group-hover:translate-x-1 duration-200">FLEET</span>
+</a>
+<a class="group flex items-center gap-4 px-4 py-3 rounded text-on-secondary-container opacity-70 hover:bg-surface-container hover:text-on-surface transition-all duration-200" href="#" onclick="getLocation(); return false;">
+<span class="material-symbols-outlined group-hover:translate-x-1 duration-200">my_location</span>
+<span class="font-label text-label-caps text-xs font-bold tracking-[0.1em] group-hover:translate-x-1 duration-200">LOCATION</span>
+</a>
+<a class="group flex items-center gap-4 px-4 py-3 rounded text-on-secondary-container opacity-70 hover:bg-surface-container hover:text-on-surface transition-all duration-200" href="#" onclick="loadCameras(); return false;">
+<span class="material-symbols-outlined group-hover:translate-x-1 duration-200">camera</span>
+<span class="font-label text-label-caps text-xs font-bold tracking-[0.1em] group-hover:translate-x-1 duration-200">CAMERA</span>
+</a>
+<a class="group flex items-center gap-4 px-4 py-3 rounded text-on-secondary-container opacity-70 hover:bg-surface-container hover:text-on-surface transition-all duration-200" href="#" onclick="toggleMic(); return false;">
+<span class="material-symbols-outlined group-hover:translate-x-1 duration-200">mic</span>
+<span class="font-label text-label-caps text-xs font-bold tracking-[0.1em] group-hover:translate-x-1 duration-200">MICROPHONE</span>
+</a>
+<a class="group flex items-center gap-4 px-4 py-3 rounded text-on-secondary-container opacity-70 hover:bg-surface-container hover:text-on-surface transition-all duration-200" href="#" onclick="loadDeviceInfo(); return false;">
+<span class="material-symbols-outlined group-hover:translate-x-1 duration-200">memory</span>
+<span class="font-label text-label-caps text-xs font-bold tracking-[0.1em] group-hover:translate-x-1 duration-200">DEVICE INFO</span>
+</a>
+</nav>
+<div class="px-8 mt-auto flex flex-col gap-4">
+<a class="group flex items-center gap-4 py-2 text-on-secondary-container opacity-70 hover:text-on-surface transition-all" href="/">
+<span class="material-symbols-outlined group-hover:translate-x-1 duration-200">logout</span>
+<span class="font-label text-label-caps text-xs font-bold tracking-[0.1em] group-hover:translate-x-1 duration-200">LOGOUT</span>
+</a>
+</div>
+</aside>
+<!-- Main Workspace -->
+<main class="flex-1 flex flex-col h-screen overflow-hidden bg-void-black">
+<header class="h-16 border-b border-moon-silver/10 flex items-center px-8 flex-shrink-0 bg-surface-elevation/50">
+<h2 class="font-headline text-lg font-bold text-on-surface tracking-wide flex items-center gap-3">
+<span class="text-hunt-crimson material-symbols-outlined">adjust</span>
+                ARTEMIS LABS <span class="text-moon-silver/40 font-normal">|</span> <span class="text-moon-silver/80">DEVICE_CMD</span>
+</h2>
+<div class="ml-auto flex items-center gap-4">
+<button onclick="refreshDevice()" class="font-label text-xs tracking-widest text-moon-silver border border-moon-silver/30 px-4 py-2 hover:border-hunt-crimson hover:text-hunt-crimson transition-colors uppercase">Refresh</button>
+<span class="font-label text-xs text-moon-silver/50 tracking-widest">SECURE_LINK_ESTABLISHED</span>
+<div class="w-2 h-2 rounded-full bg-maquis-green animate-pulse"></div>
+</div>
+</header>
+<div class="flex-1 overflow-y-auto p-8">
+<div class="max-w-7xl mx-auto flex flex-col gap-8">
+<!-- Status Cards Grid -->
+<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+<div class="bg-surface-elevation/40 border border-moon-silver/10 rounded-lg p-5 flex flex-col justify-between hover:border-moon-silver/30 transition-colors backdrop-blur-sm" id="statusOnline">
+<div class="flex items-center justify-between mb-4">
+<span class="font-label text-xs text-moon-silver/50 tracking-widest">DEVICE STATUS</span>
+<span class="material-symbols-outlined text-maquis-green animate-pulse">wifi_tethering</span>
+</div>
+<div class="font-headline text-2xl font-bold text-maquis-green value">—</div>
+</div>
+<div class="bg-surface-elevation/40 border border-moon-silver/10 rounded-lg p-5 flex flex-col justify-between hover:border-moon-silver/30 transition-colors backdrop-blur-sm" id="statusBattery">
+<div class="flex items-center justify-between mb-4">
+<span class="font-label text-xs text-moon-silver/50 tracking-widest">BATTERY</span>
+<span class="material-symbols-outlined text-moon-silver/80">battery_5_bar</span>
+</div>
+<div class="font-headline text-2xl font-bold text-on-surface value">—</div>
+</div>
+<div class="bg-surface-elevation/40 border border-moon-silver/10 rounded-lg p-5 flex flex-col justify-between hover:border-moon-silver/30 transition-colors backdrop-blur-sm" id="statusUptime">
+<div class="flex items-center justify-between mb-4">
+<span class="font-label text-xs text-moon-silver/50 tracking-widest">UPTIME</span>
+<span class="material-symbols-outlined text-moon-silver/80">schedule</span>
+</div>
+<div class="font-headline text-2xl font-bold text-on-surface value">—</div>
+</div>
+<div class="bg-surface-elevation/40 border border-moon-silver/10 rounded-lg p-5 flex flex-col justify-between hover:border-moon-silver/30 transition-colors backdrop-blur-sm" id="statusNetwork">
+<div class="flex items-center justify-between mb-4">
+<span class="font-label text-xs text-moon-silver/50 tracking-widest">NETWORK</span>
+<span class="material-symbols-outlined text-moon-silver/80">router</span>
+</div>
+<div class="font-label text-[15px] font-bold text-pyrenees-frost value">—</div>
+</div>
+</div>
+<!-- Main Bento Grid -->
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+<!-- Location Panel -->
+<div class="col-span-1 lg:col-span-2 bg-surface-elevation/40 border border-moon-silver/10 rounded-lg p-6 flex flex-col relative overflow-hidden">
+<div class="flex items-center justify-between mb-6 z-10 relative">
+<h3 class="font-headline text-lg font-bold text-on-surface flex items-center gap-2">
+<span class="material-symbols-outlined text-sm">my_location</span> LOCATION
+                            </h3>
+<div class="flex gap-4 font-label text-sm text-pyrenees-frost bg-void-black/80 px-3 py-1 border border-moon-silver/10 rounded" id="locationCoords">
+<span>NO_FIX</span>
+</div>
+</div>
+<div class="flex-1 min-h-[300px] border border-moon-silver/10 rounded relative overflow-hidden bg-void-black">
+<div class="absolute inset-0 flex items-center justify-center pointer-events-none">
+<div class="w-[200px] h-[200px] border border-moon-silver/10 rounded-full relative">
+<div class="absolute top-1/2 left-0 w-full h-[1px] bg-moon-silver/10"></div>
+<div class="absolute top-0 left-1/2 w-[1px] h-full bg-moon-silver/10"></div>
+<div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-2 h-2 bg-hunt-crimson rounded-full shadow-[0_0_10px_#B8323A]"></div>
+</div>
+</div>
+<div id="locationData" class="absolute bottom-3 left-3 z-10 font-label text-xs text-moon-silver/60 bg-void-black/80 border border-moon-silver/10 px-3 py-2 rounded">NO_LOCATION_DATA</div>
+</div>
+<button onclick="getLocation()" class="mt-4 self-end font-label text-xs tracking-widest text-moon-silver border border-moon-silver/30 px-4 py-2 hover:border-hunt-crimson hover:text-hunt-crimson transition-colors uppercase">Acquire Fix</button>
+</div>
+<!-- Camera Panel -->
+<div class="col-span-1 bg-surface-elevation/40 border border-moon-silver/10 rounded-lg p-6 flex flex-col">
+<h3 class="font-headline text-lg font-bold text-on-surface flex items-center gap-2 mb-6">
+<span class="material-symbols-outlined text-sm">camera</span> CAMERA
+                        </h3>
+<div class="flex-1 flex flex-col gap-4">
+<div class="space-y-2">
+<label class="font-label text-xs text-moon-silver/60 tracking-widest">AVAILABLE SENSORS</label>
+<div class="flex flex-col gap-2" id="cameraList">
+<div class="flex items-center gap-3 p-3 border border-moon-silver/10 rounded opacity-50">
+<span class="material-symbols-outlined text-sm text-moon-silver/60">videocam_off</span>
+<span class="font-label text-sm text-on-surface/60">LOADING...</span>
+</div>
+</div>
+</div>
+<div id="cameraData" class="hidden"></div>
+<div class="mt-auto pt-6">
+<button onclick="capturePhoto()" class="w-full py-4 bg-hunt-crimson/10 border border-hunt-crimson/50 text-hunt-crimson font-label text-sm font-bold tracking-widest rounded hover:bg-hunt-crimson hover:text-white transition-all flex items-center justify-center gap-2 group">
+<span class="material-symbols-outlined text-lg group-hover:scale-110 transition-transform">camera_enhance</span>
+                                    CAPTURE
+                                </button>
+</div>
+</div>
+</div>
+<!-- Microphone Panel -->
+<div class="col-span-1 bg-surface-elevation/40 border border-moon-silver/10 rounded-lg p-6 flex flex-col">
+<h3 class="font-headline text-lg font-bold text-on-surface flex items-center gap-2 mb-6">
+<span class="material-symbols-outlined text-sm">mic</span> MICROPHONE
+                        </h3>
+<div class="flex-1 flex flex-col gap-6 justify-center">
+<div class="h-16 flex items-center justify-center gap-1 opacity-50">
+<div class="w-1.5 h-4 bg-pyrenees-frost rounded-full"></div>
+<div class="w-1.5 h-8 bg-pyrenees-frost rounded-full"></div>
+<div class="w-1.5 h-12 bg-pyrenees-frost rounded-full"></div>
+<div class="w-1.5 h-6 bg-pyrenees-frost rounded-full"></div>
+<div class="w-1.5 h-16 bg-pyrenees-frost rounded-full"></div>
+<div class="w-1.5 h-10 bg-pyrenees-frost rounded-full"></div>
+<div class="w-1.5 h-5 bg-pyrenees-frost rounded-full"></div>
+<div class="w-1.5 h-14 bg-pyrenees-frost rounded-full"></div>
+<div class="w-1.5 h-8 bg-pyrenees-frost rounded-full"></div>
+<div class="w-1.5 h-3 bg-pyrenees-frost rounded-full"></div>
+</div>
+<div id="micData" class="font-label text-xs text-moon-silver/60 tracking-widest text-center">STANDBY</div>
+<div class="flex gap-4">
+<button onclick="toggleMic()" id="micBtn" class="flex-1 py-3 bg-void-black border border-moon-silver/20 text-moon-silver font-label text-xs font-bold tracking-widest rounded hover:border-hunt-crimson hover:text-hunt-crimson transition-all flex items-center justify-center gap-2">
+<span class="material-symbols-outlined text-sm">fiber_manual_record</span>
+                                    START
+                                </button>
+</div>
+</div>
+</div>
+<!-- Device Info Panel -->
+<div class="col-span-1 lg:col-span-2 bg-surface-elevation/40 border border-moon-silver/10 rounded-lg p-6 flex flex-col">
+<h3 class="font-headline text-lg font-bold text-on-surface flex items-center gap-2 mb-6">
+<span class="material-symbols-outlined text-sm">memory</span> DEVICE INFO
+                        </h3>
+<div class="bg-void-black border border-moon-silver/10 rounded p-4 font-label text-sm text-moon-silver/80 space-y-3 flex-1" id="deviceInfoData">
+<div class="data-row"><span>NO_DATA</span><span>ACQUIRE INFO</span></div>
+</div>
+<button onclick="loadDeviceInfo()" class="mt-4 self-end font-label text-xs tracking-widest text-moon-silver border border-moon-silver/30 px-4 py-2 hover:border-hunt-crimson hover:text-hunt-crimson transition-colors uppercase">Acquire Info</button>
+</div>
+</div>
+</div>
+</div>
+</main>
+</div>
+<script src="/static/js/dashboard.js"></script>
+</body></html>

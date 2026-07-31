@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Artemis Labs | Device Fleet</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&amp;family=JetBrains+Mono:wght@400;700&amp;family=Crimson+Pro:wght@400&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<script id="tailwind-config">
+        tailwind.config = {
+          darkMode: "class",
+          theme: {
+            extend: {
+              "colors": {
+                      "on-tertiary-container": "#cbe5ff",
+                      "on-surface": "#e4e1e9",
+                      "surface": "#131318",
+                      "surface-container-low": "#1b1b20",
+                      "error-container": "#93000a",
+                      "outline": "#a88a88",
+                      "primary-container": "#b8323a",
+                      "surface-container-high": "#2a292f",
+                      "outline-variant": "#594140",
+                      "on-tertiary": "#003350",
+                      "surface-container": "#1f1f25",
+                      "secondary-fixed-dim": "#c5c6cd",
+                      "on-error": "#690005",
+                      "inverse-on-surface": "#303036",
+                      "on-primary": "#680011",
+                      "surface-container-lowest": "#0e0e13",
+                      "on-tertiary-fixed-variant": "#1d4a6a",
+                      "background": "#131318",
+                      "secondary-container": "#47494f",
+                      "surface-tint": "#ffb3b1",
+                      "on-secondary-container": "#b7b8bf",
+                      "primary-fixed-dim": "#ffb3b1",
+                      "secondary-fixed": "#e1e2e9",
+                      "on-secondary-fixed-variant": "#44474c",
+                      "secondary": "#c5c6cd",
+                      "tertiary-container": "#3e6889",
+                      "on-secondary-fixed": "#191c21",
+                      "on-secondary": "#2e3036",
+                      "tertiary": "#a2cbf1",
+                      "surface-variant": "#35343a",
+                      "surface-container-highest": "#35343a",
+                      "primary-fixed": "#ffdad8",
+                      "inverse-primary": "#b02c35",
+                      "error": "#ffb4ab",
+                      "on-error": "#690005",
+                      "tertiary-fixed": "#cce5ff",
+                      "outline": "#a88a88",
+                      "on-surface-variant": "#e0bfbd",
+                      "on-primary-fixed-variant": "#8e1020",
+                      "on-primary-container": "#ffd9d7",
+                      "primary": "#ffb3b1",
+                      "on-tertiary-fixed": "#001e31",
+                      "on-primary-fixed": "#410007",
+                      "void-black": "#0A0A0F",
+                      "moon-silver": "#C8C9D0",
+                      "hunt-crimson": "#B8323A",
+                      "pyrenees-frost": "#7BA4C8",
+                      "maquis-green": "#4A7C59",
+                      "gestapo-amber": "#D4A03D",
+              },
+              "borderRadius": {
+                      "DEFAULT": "0.25rem",
+                      "lg": "0.5rem",
+                      "xl": "0.75rem",
+                      "full": "9999px"
+              },
+              "spacing": {},
+              "fontFamily": {
+                      "headline": ["Space Grotesk"],
+                      "display": ["Space Grotesk"],
+                      "body": ["Space Grotesk"],
+                      "label": ["Jetbrains Mono"]
+              },
+              "fontSize": {}
+      },
+          },
+        }
+      </script>
+<style>
+        body {
+            background-color: #0A0A0F; /* Void Black */
+            color: #C8C9D0; /* Moon Silver */
+        }
+        .shadow-dweller-card {
+            background: linear-gradient(180deg, #12121A 0%, #0A0A0F 100%);
+            border: 1px solid #C8C9D0; /* Moon Silver stroke */
+        }
+        .shadow-dweller-card.selected {
+             border: 1px solid #B8323A; /* Hunt Crimson */
+        }
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #0A0A0F;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #35343a;
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #594140;
+        }
+    </style>
+</head>
+<body class="font-body antialiased min-h-screen flex flex-col selection:bg-hunt-crimson selection:text-white">
+<nav class="bg-void-black border-b border-outline-variant flex justify-between items-center w-full px-6 py-3 max-w-[1440px] mx-auto z-50 sticky top-0">
+<div class="flex items-center gap-6">
+<div class="flex items-center gap-3">
+<svg class="h-8 w-8" viewBox="0 0 48 48" fill="none">
+    <circle cx="24" cy="24" r="22" stroke="#B8323A" stroke-width="2"/>
+    <circle cx="24" cy="24" r="16" stroke="#B8323A" stroke-width="1" stroke-dasharray="3 3"/>
+    <path d="M24 8 L24 40 M8 24 L40 24" stroke="#C8C9D0" stroke-width="1.5"/>
+    <circle cx="24" cy="24" r="4" fill="#B8323A"/>
+</svg>
+<div>
+<h1 class="font-headline text-lg font-bold tracking-tighter text-moon-silver">ARTEMIS LABS</h1>
+<p class="font-label text-[10px] text-moon-silver/60 tracking-[0.15em] uppercase">Device Fleet</p>
+</div>
+</div>
+<div class="hidden md:flex items-center gap-6 ml-8">
+<a class="font-body text-base text-hunt-crimson border-b-2 border-hunt-crimson pb-1 flex items-center gap-2" href="#">
+<span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 0;">devices</span>
+                    Devices
+                </a>
+<a class="font-body text-base text-moon-silver/70 hover:text-moon-silver transition-colors flex items-center gap-2" href="#">
+<span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 0;">hub</span>
+                    Cells
+                </a>
+<a class="font-body text-base text-moon-silver/70 hover:text-moon-silver transition-colors flex items-center gap-2" href="#">
+<span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 0;">rocket_launch</span>
+                    Payloads
+                </a>
+<a class="font-body text-base text-moon-silver/70 hover:text-moon-silver transition-colors flex items-center gap-2" href="#">
+<span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 0;">policy</span>
+                    Intel
+                </a>
+</div>
+</div>
+<div class="flex items-center gap-4">
+<button onclick="refreshAll()" class="font-label text-xs tracking-wider text-moon-silver bg-transparent border border-moon-silver px-4 py-2 hover:bg-surface-container-highest transition-colors flex items-center gap-2 rounded-none uppercase">
+<span class="material-symbols-outlined text-sm" style="font-variation-settings: 'FILL' 0;">refresh</span>
+                Refresh
+            </button>
+<button onclick="pairDevice()" class="font-label text-xs tracking-wider text-white bg-hunt-crimson px-4 py-2 hover:bg-inverse-primary transition-colors flex items-center gap-2 rounded-none uppercase">
+<span class="material-symbols-outlined text-sm" style="font-variation-settings: 'FILL' 0;">add</span>
+                Add Device
+            </button>
+<div class="h-6 w-px bg-outline-variant mx-2"></div>
+<button onclick="logout()" aria-label="Logout" class="text-pyrenees-frost hover:text-white hover:underline transition-colors p-2 flex items-center justify-center group">
+<span class="material-symbols-outlined group-hover:scale-110 transition-transform" style="font-variation-settings: 'FILL' 0;">logout</span>
+</button>
+</div>
+</nav>
+<main class="flex-grow w-full max-w-[1440px] mx-auto px-6 py-8 flex flex-col gap-8">
+<header class="flex justify-between items-end border-b border-outline-variant pb-4">
+<div>
+<h2 class="font-headline text-3xl font-bold text-moon-silver tracking-tight">ACTIVE ASSETS</h2>
+<p class="font-label text-xs text-moon-silver/60 tracking-widest mt-1" id="fleetStatus">FLEET_STATUS: {{ devices.values() | selectattr('paired') | list | length }}_PAIRED</p>
+</div>
+<div class="flex items-center gap-4">
+<div class="relative">
+<span class="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-moon-silver/50 text-sm">search</span>
+<input id="fleetSearch" class="bg-void-black border border-outline-variant text-moon-silver font-label text-sm py-2 pl-9 pr-4 focus:outline-none focus:border-hunt-crimson w-64 rounded-none placeholder-moon-silver/30" placeholder="QUERY FLEET..." type="text"/>
+</div>
+</div>
+</header>
+<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6" id="deviceGrid">
+{% for key, dev in devices.items() %}
+<article class="shadow-dweller-card {{ 'selected' if dev.paired else '' }} p-5 flex flex-col gap-4 relative group" data-key="{{ key }}">
+{% if dev.paired %}
+<div class="absolute top-0 right-0 w-2 h-2 bg-hunt-crimson border-l border-b border-hunt-crimson"></div>
+{% endif %}
+<header class="flex justify-between items-start">
+<div>
+<h3 class="font-headline text-lg font-bold text-moon-silver truncate">{{ dev.name or dev.device_id or key }}</h3>
+<p class="font-label text-xs text-moon-silver/70 mt-1">{{ dev.host }}:{{ dev.port }}</p>
+</div>
+<div class="flex items-center gap-2">
+<span class="font-label text-[10px] text-moon-silver/60">{{ 'ONLINE' if dev.paired else 'UNPAIRED' }}</span>
+<div class="w-2 h-2 rounded-full {{ 'bg-maquis-green shadow-[0_0_4px_#4A7C59]' if dev.paired else 'bg-moon-silver/30' }}"></div>
+</div>
+</header>
+<div class="flex-grow flex flex-col justify-center py-2">
+{% if dev.paired %}
+<div class="flex justify-between items-center mb-1">
+<span class="font-label text-[10px] text-moon-silver/60">DEVICE_ID</span>
+<span class="font-label text-[10px] text-moon-silver truncate max-w-[70%]">{{ dev.device_id or '—' }}</span>
+</div>
+{% else %}
+<div class="flex justify-between items-center mb-1">
+<span class="font-label text-[10px] text-moon-silver/60">STATUS</span>
+<span class="font-label text-[10px] text-gestapo-amber">AWAITING_PAIR</span>
+</div>
+{% endif %}
+</div>
+<footer class="pt-4 border-t border-outline-variant mt-auto">
+{% if dev.paired %}
+<button onclick="openDashboard('{{ key }}')" class="w-full font-label text-xs tracking-widest text-moon-silver bg-transparent border border-moon-silver py-2 hover:bg-surface-container-high transition-colors uppercase">
+                        Manage
+                    </button>
+<button onclick="forgetDevice('{{ key }}')" class="w-full font-label text-[10px] tracking-widest text-moon-silver/40 hover:text-error py-1 transition-colors uppercase mt-1">
+                        Forget
+                    </button>
+{% else %}
+<button onclick="pairDevice('{{ key }}')" class="w-full font-label text-xs tracking-widest text-hunt-crimson bg-transparent border border-hunt-crimson/50 py-2 hover:bg-hunt-crimson hover:text-white transition-colors uppercase">
+                        Pair Now
+                    </button>
+{% endif %}
+</footer>
+</article>
+{% endfor %}
+<button onclick="pairDevice()" class="shadow-dweller-card p-5 flex flex-col items-center justify-center gap-4 min-h-[200px] border-dashed border-hunt-crimson/50 hover:border-hunt-crimson hover:bg-surface-container-lowest transition-all group">
+<div class="w-12 h-12 rounded-full border-2 border-hunt-crimson/50 group-hover:border-hunt-crimson flex items-center justify-center transition-colors">
+<span class="material-symbols-outlined text-hunt-crimson/80 group-hover:text-hunt-crimson transition-colors" style="font-variation-settings: 'wght' 300;">add</span>
+</div>
+<span class="font-label text-sm text-moon-silver tracking-widest uppercase group-hover:text-white transition-colors">PROVISION_NEW</span>
+</button>
+</div>
+</main>
+
+<!-- Pair Modal -->
+<div id="pairModal" class="hidden fixed inset-0 z-[100] bg-void-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+<div class="w-full max-w-md bg-surface-elevation border border-outline-variant/50 shadow-tactical p-8 flex flex-col gap-6">
+<h3 class="font-headline text-xl font-bold text-moon-silver tracking-tight">PROVISION DEVICE</h3>
+<form id="pairForm" class="flex flex-col gap-5">
+<input type="hidden" id="pairKey" name="key"/>
+<div class="flex flex-col gap-2">
+<label class="font-label text-xs font-bold tracking-widest text-on-surface uppercase" for="pairHost">DEVICE_IP</label>
+<input class="w-full bg-void-black border border-outline-variant text-on-surface font-label text-sm py-3 px-4 rounded-none transition-colors placeholder:text-on-surface-variant/30 focus:border-hunt-crimson" id="pairHost" name="host" placeholder="192.168.0.x" required/>
+</div>
+<div class="flex flex-col gap-2">
+<label class="font-label text-xs font-bold tracking-widest text-on-surface uppercase" for="pairCode">PAIRING_CODE</label>
+<input class="w-full bg-void-black border border-outline-variant text-on-surface font-label text-sm py-3 px-4 rounded-none transition-colors placeholder:text-on-surface-variant/30 focus:border-hunt-crimson" id="pairCode" name="code" placeholder="6-DIGIT CODE FROM PHONE" required maxlength="6" pattern="[0-9]{6}"/>
+</div>
+<div id="pairError" class="hidden font-label text-xs tracking-widest text-error uppercase"></div>
+<div class="flex gap-3 pt-2">
+<button type="submit" class="flex-1 bg-hunt-crimson text-white font-label text-xs font-bold tracking-widest py-3 rounded-none uppercase hover:bg-inverse-primary transition-colors">Pair</button>
+<button type="button" onclick="closePairModal()" class="flex-1 font-label text-xs tracking-widest text-moon-silver bg-transparent border border-moon-silver py-3 rounded-none uppercase hover:bg-surface-container-high transition-colors">Cancel</button>
+</div>
+</form>
+</div>
+</div>
+
+<script src="/static/js/devices.js"></script>
+</body></html>

@@ -86,6 +86,11 @@ dependencies {
 
     // Security
     implementation(libs.androidx.security.crypto)
+    // BouncyCastle — self-signed TLS cert generation (Conscrypt/AndroidKeyStore
+    // RSA handshake is broken on some devices: 04000044 internal error; a
+    // software keypair avoids the TEE routing bug entirely)
+    implementation(libs.bouncycastle.bcprov)
+    implementation(libs.bouncycastle.bcpkix)
 
     // OKIO
     implementation(libs.okio)

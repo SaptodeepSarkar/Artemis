@@ -26,6 +26,11 @@ class ArtemisApp : Application() {
     @Volatile
     var currentPairingCode: PairingCode? = null
 
+    // Shared state for the TLS cert SHA-256 fingerprint (shown on screen so
+    // the dashboard operator can verify the pin they see matches the phone)
+    @Volatile
+    var currentCertFingerprint: String? = null
+
     override fun onCreate() {
         super.onCreate()
         instance = this

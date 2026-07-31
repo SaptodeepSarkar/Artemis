@@ -85,6 +85,7 @@ fun DashboardScreen(
 
     // ---- pairing code state ----
     var pairingCode by remember { mutableStateOf<String?>(null) }
+    var certFingerprint by remember { mutableStateOf<String?>(null) }
     var connectedClients by remember { mutableIntStateOf(0) }
     var isRefreshingCode by remember { mutableStateOf(false) }
     var serverIpAddress by remember { mutableStateOf<String?>(null) }
@@ -153,6 +154,7 @@ fun DashboardScreen(
         delay(3000)
         // Read code from shared in-process state — no network call
         pairingCode = ArtemisApp.instance.currentPairingCode?.code
+        certFingerprint = ArtemisApp.instance.currentCertFingerprint
         android.util.Log.i("Dashboard", if (pairingCode != null) "Pairing code available on screen" else "No pairing code in shared state yet")
     }
 
@@ -162,6 +164,8 @@ fun DashboardScreen(
             // Follow the 5-minute server-side rotation: the code shown on
             // screen must always match the code the server will accept.
             pairingCode = ArtemisApp.instance.currentPairingCode?.code
+            // TLS cert fingerprint (stable across rotations — set at server start)
+            certFingerprint = ArtemisApp.instance.currentCertFingerprint
             // connectedClients would be updated by server events
             delay(5_000L)
         }
@@ -224,6 +228,7 @@ fun DashboardScreen(
             item(key = "pairing") {
                 PairingCodeCard(
                     pairingCode = pairingCode,
+                    certFingerprint = certFingerprint,
                     serverIp = serverIpAddress,
                     onRefresh = { regeneratePairingCode() },
                     isRefreshing = isRefreshingCode
@@ -313,6 +318,7 @@ private fun StatusCard(isRunning: Boolean) {
 @Composable
 private fun PairingCodeCard(
     pairingCode: String?,
+    certFingerprint: String?,
     serverIp: String?,
     onRefresh: () -> Unit,
     isRefreshing: Boolean
@@ -392,9 +398,23 @@ private fun PairingCodeCard(
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            if (certFingerprint != null) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "TLS PIN  ${certFingerprint.replace(":", "").take(16).chunked(4).joinToString(":")}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.secondary,
+                    fontFamily = FontFamily.Monospace
+                )
+                Text(
+                    text = "Encrypted connection — verify this PIN in the dashboard",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
             if (serverIp != null) {
                 Text(
-                    text = "Server: http://$serverIp:8443",
+                    text = "Server: https://$serverIp:8443",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.primary,
                     fontFamily = FontFamily.Monospace

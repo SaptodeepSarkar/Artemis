@@ -192,6 +192,10 @@
 <span class="font-label text-[10px] text-moon-silver/60">DEVICE_ID</span>
 <span class="font-label text-[10px] text-moon-silver truncate max-w-[70%]">{{ dev.device_id or '—' }}</span>
 </div>
+<div class="flex justify-between items-center mb-1">
+<span class="font-label text-[10px] text-moon-silver/60">TLS_PIN</span>
+<span class="font-label text-[10px] text-maquis-green truncate max-w-[70%]" title="SHA-256 fingerprint of the phone's TLS certificate — compare with the phone screen">{{ dev.cert_fp or '—' }}</span>
+</div>
 {% else %}
 <div class="flex justify-between items-center mb-1">
 <span class="font-label text-[10px] text-moon-silver/60">STATUS</span>

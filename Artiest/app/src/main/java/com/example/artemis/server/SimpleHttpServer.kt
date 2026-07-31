@@ -25,7 +25,10 @@ import java.io.OutputStream
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.URLDecoder
+import java.security.MessageDigest
 import java.security.SecureRandom
+import javax.net.ssl.SSLSocket
+import javax.net.ssl.SSLSocketFactory
 import kotlinx.coroutines.runBlocking
 
 // ============================================================
@@ -128,6 +131,7 @@ class SimpleHttpServer(
     private val useTls: Boolean = true
 ) {
     private var serverSocket: ServerSocket? = null
+    private var sslSocketFactory: SSLSocketFactory? = null
     private val serverScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val json = Json {
         ignoreUnknownKeys = true
@@ -138,6 +142,11 @@ class SimpleHttpServer(
     private val secureRandom = SecureRandom()
     private var pairingCode: PairingCode? = null
     private var connectedClients = 0
+
+    // Rate limiting — per-IP fixed window. Loopback (phone UI) is exempt.
+    private val requestLimiter = RateLimiter(maxRequests = 120, windowMs = 60_000L)
+    private val pairingFailures = mutableMapOf<String, Int>()  // ip -> consecutive fails
+    private val maxPairingFailures = 5
 
     @Volatile
     var activeConnections: Int = 0
@@ -232,6 +241,8 @@ class SimpleHttpServer(
             "deviceName" to android.os.Build.MODEL,
             "uptimeSeconds" to ((System.currentTimeMillis() - startTime) / 1000),
             "activeConnections" to activeConnections,
+            "tls" to (sslSocketFactory != null),
+            "certFp" to (app.currentCertFingerprint ?: ""),
             "timestamp" to System.currentTimeMillis()
         ))
     }
@@ -257,14 +268,34 @@ class SimpleHttpServer(
         val body = parseJsonObject(req.body) ?: return jsonResponse(400, mapOf("error" to "invalid_request", "message" to "Invalid JSON body"))
         val code = body["code"] ?: return jsonResponse(400, mapOf("error" to "invalid_request", "message" to "Missing pairing code"))
 
-        // Check the pairing code
+        // Brute-force guard: max 5 failed attempts per IP per rotation window.
+        // Rotation clears the counters, so a lockout lasts at most 5 minutes.
+        val remote = req.remoteAddress
+        val isLoopback = remote == "127.0.0.1" || remote == "::1" || remote.startsWith("127.")
+        val fails = synchronized(pairingFailures) { pairingFailures[remote] ?: 0 }
+        if (!isLoopback && fails >= maxPairingFailures) {
+            return jsonResponse(429, mapOf(
+                "error" to "pairing_locked",
+                "message" to "Too many failed attempts — code locked until rotation"
+            ))
+        }
+
+        // Check the pairing code (constant-time compare — no timing side channel)
         val currentCode = pairingCode
-        if (currentCode == null || currentCode.code != code) {
+        val codeMatches = currentCode != null &&
+            MessageDigest.isEqual(currentCode.code.toByteArray(), code.toByteArray())
+        if (!codeMatches) {
+            if (!isLoopback) synchronized(pairingFailures) {
+                pairingFailures[remote] = fails + 1
+            }
             return jsonResponse(401, mapOf("error" to "pairing_failed", "message" to "Invalid pairing code"))
         }
-        if (System.currentTimeMillis() > currentCode.expiresAt) {
+        if (System.currentTimeMillis() > currentCode!!.expiresAt) {
             return jsonResponse(401, mapOf("error" to "pairing_failed", "message" to "Pairing code expired"))
         }
+
+        // Success — reset this IP's failure counter
+        synchronized(pairingFailures) { pairingFailures.remove(remote) }
 
         val deviceId = try { android.os.Build.getSerial() } catch (_: Exception) { android.os.Build.FINGERPRINT }
         val clientId = "client_${System.currentTimeMillis()}"
@@ -576,6 +607,20 @@ class SimpleHttpServer(
             serverSocket = ServerSocket(port)
             Log.i("ArtemisServer", "ServerSocket bound to 0.0.0.0:$port")
 
+            // TLS: generate/load the AndroidKeyStore self-signed cert. Loopback
+            // connections (phone UI) stay plaintext; every network connection
+            // is upgraded to TLS by the accept loop.
+            if (useTls) {
+                val ctx = TlsManager.getSslContext(app)
+                sslSocketFactory = ctx.socketFactory
+                app.currentCertFingerprint = TlsManager.getFingerprint(app)
+                Log.i("ArtemisServer", "TLS enabled — cert SHA-256 fingerprint ${TlsManager.getFingerprint(app).take(23)}…")
+            } else {
+                sslSocketFactory = null
+                app.currentCertFingerprint = null
+                Log.w("ArtemisServer", "TLS DISABLED — plaintext server (dev mode)")
+            }
+
             // Generate initial pairing code and publish to shared state
             pairingCode = authManager.generatePairingCode()
             app.currentPairingCode = pairingCode
@@ -585,7 +630,8 @@ class SimpleHttpServer(
             }
 
             // Rotate the pairing code every 5 minutes so a stale code
-            // can never be used for pairing later.
+            // can never be used for pairing later. Rotation also clears
+            // per-IP pairing lockouts — the new code resets the game.
             serverScope.launch {
                 while (serverScope.isActive) {
                     delay(AuthManager.PAIRING_CODE_EXPIRY_MS)
@@ -593,6 +639,7 @@ class SimpleHttpServer(
                     val fresh = authManager.generatePairingCode()
                     pairingCode = fresh
                     app.currentPairingCode = fresh
+                    synchronized(pairingFailures) { pairingFailures.clear() }
                     Log.i("ArtemisServer", "Pairing code rotated (new code shown on screen only)")
                 }
             }
@@ -612,12 +659,26 @@ class SimpleHttpServer(
                 try {
                     val client = socket.accept()
                     activeConnections++
-                    Log.i("ArtemisServer", "Connection accepted from ${client.inetAddress.hostAddress}")
+                    val loopback = client.inetAddress?.isLoopbackAddress == true
+                    Log.i("ArtemisServer", "Connection accepted from ${client.inetAddress.hostAddress}" +
+                            if (loopback) " (loopback)" else " (TLS)")
                     serverScope.launch {
                         try {
-                            handleConnection(client)
+                            if (!loopback && sslSocketFactory != null) {
+                                // Upgrade to TLS. Plaintext talkers on the network
+                                // fail the handshake and get nothing but a closed
+                                // connection — exactly the "garbage to others" goal.
+                                val ssl = sslSocketFactory!!.createSocket(
+                                    client, client.inetAddress.hostAddress, port, true
+                                ) as SSLSocket
+                                ssl.useClientMode = false
+                                ssl.startHandshake()
+                                handleConnection(ssl)
+                            } else {
+                                handleConnection(client)
+                            }
                         } catch (e: Exception) {
-                            Log.e("ArtemisServer", "Error handling connection: ${e.message}")
+                            Log.e("ArtemisServer", "Error handling connection: ${e.message}", e)
                         } finally {
                             activeConnections--
                         }
@@ -649,6 +710,18 @@ class SimpleHttpServer(
             }
 
             Log.i("ArtemisServer", "-> ${request.method} ${request.path}")
+
+            // Standard rate limiting — per-IP fixed window (loopback exempt,
+            // the phone UI polls every few seconds).
+            val remote = request.remoteAddress
+            val isLoopback = remote == "127.0.0.1" || remote == "::1" || remote.startsWith("127.")
+            if (!isLoopback && !requestLimiter.allow(remote)) {
+                sendHttpResponse(output, HttpResponse(
+                    429, contentType = "application/json",
+                    body = """{"error":"rate_limited","message":"Too many requests — try again shortly"}"""
+                ))
+                return
+            }
 
             // Route the request
             val response = router.dispatch(request.method, request.path, request)
@@ -754,9 +827,11 @@ class SimpleHttpServer(
                 200 -> "OK"
                 400 -> "Bad Request"
                 401 -> "Unauthorized"
+                403 -> "Forbidden"
                 404 -> "Not Found"
                 405 -> "Method Not Allowed"
                 409 -> "Conflict"
+                429 -> "Too Many Requests"
                 500 -> "Internal Server Error"
                 else -> "Unknown"
             }
@@ -883,5 +958,33 @@ class SimpleHttpServer(
         serverSocket = null
         serverScope.cancel()
         Log.i("ArtemisServer", "Server stopped")
+    }
+}
+
+// ============================================================
+// RateLimiter — per-IP fixed-window counter
+// ============================================================
+
+private class RateLimiter(
+    private val maxRequests: Int,
+    private val windowMs: Long
+) {
+    // ip -> [windowStartMs, count]
+    private val buckets = mutableMapOf<String, LongArray>()
+    private val lock = Any()
+
+    /** Returns true if the request is allowed, false if over the limit. */
+    fun allow(ip: String): Boolean {
+        synchronized(lock) {
+            val now = System.currentTimeMillis()
+            val b = buckets.getOrPut(ip) { longArrayOf(now, 0) }
+            if (now - b[0] >= windowMs) {
+                b[0] = now
+                b[1] = 0
+            }
+            if (b[1] >= maxRequests) return false
+            b[1]++
+            return true
+        }
     }
 }

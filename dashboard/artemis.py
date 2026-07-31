@@ -33,6 +33,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import os
 import socket
@@ -50,6 +51,7 @@ DISCOVERY_PORT = 9090
 DISCOVERY_MAGIC = b'\x41'
 CONFIG_DIR = Path.home() / ".config" / "artemis"
 TOKEN_FILE = CONFIG_DIR / "tokens.json"
+KNOWN_HOSTS_FILE = CONFIG_DIR / "known_hosts.json"
 
 
 # ─── Token encryption at rest ──────────────────────────────────────────────
@@ -168,31 +170,78 @@ def discover_devices(timeout=5):
 # ─── HTTPS Client ────────────────────────────────────────────────────────────
 
 def _create_ssl_context():
-    """Create SSL context that accepts self-signed certs."""
+    """Create SSL context that accepts self-signed certs (pin-checked by hand)."""
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
     return ctx
 
 
+def _load_known_hosts():
+    """host:port -> SHA256 pin for every device we've ever talked to (TOFU)."""
+    if KNOWN_HOSTS_FILE.exists():
+        try:
+            return json.loads(KNOWN_HOSTS_FILE.read_text())
+        except (json.JSONDecodeError, PermissionError, OSError):
+            pass
+    return {}
+
+
+def _save_known_hosts(pins):
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    KNOWN_HOSTS_FILE.write_text(json.dumps(pins, indent=2))
+
+
+def _pin_for(host, port):
+    return _load_known_hosts().get(f"{host}:{port}")
+
+
+def _remember_pin(host, port, pin):
+    pins = _load_known_hosts()
+    pins[f"{host}:{port}"] = pin
+    _save_known_hosts(pins)
+
+
+def _peer_pin(resp):
+    """Extract the peer cert SHA-256 pin from an open urllib response."""
+    try:
+        sock = resp.fp.raw._sock  # SSLSocket under the HTTPResponse
+        der = sock.getpeercert(binary_form=True)
+        if der:
+            return "SHA256:" + hashlib.sha256(der).hexdigest()
+    except Exception:
+        pass
+    return None
+
+
 def api_request(host, path, method="GET", data=None, token=None, port=DEFAULT_PORT):
-    """Make HTTP request to Artemis server."""
-    url = f"http://{host}:{port}{path}"
-    
+    """Make HTTPS request to Artemis server with TOFU cert pinning."""
+    url = f"https://{host}:{port}{path}"
+
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    
+
     body = json.dumps(data).encode() if data else None
-    
+
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
-    
+
     try:
         ctx = _create_ssl_context()
         with urllib.request.urlopen(req, context=ctx, timeout=10) as resp:
+            # TOFU pinning: verify the presented cert matches what we pinned
+            # on first contact. Refuse on mismatch (possible MITM or reinstall).
+            observed = _peer_pin(resp)
+            expected = _pin_for(host, port)
+            if expected and observed and expected != observed:
+                return {"error": "cert_mismatch",
+                        "message": "Device TLS certificate changed — possible "
+                                   "MITM or reinstall. Forget and re-pair."}
+            if observed:
+                _remember_pin(host, port, observed)
             raw = resp.read().decode()
             return json.loads(raw)
     except urllib.error.HTTPError as e:

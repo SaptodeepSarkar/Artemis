@@ -29,6 +29,10 @@ androidxSqlite = "2.4.0"
 # Okio
 okio = "3.7.0"
 
+# BouncyCastle
+bouncycastle = "1.78.1"
+bouncycastlePkix = "1.78.1"
+
 [libraries]
 # Core AndroidX
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -68,6 +72,10 @@ play-services-location = { group = "com.google.android.gms", name = "play-servic
 
 # Security
 androidx-security-crypto = { group = "androidx.security", name = "security-crypto", version.ref = "securityCrypto" }
+
+# BouncyCastle
+bouncycastle-bcprov = { group = "org.bouncycastle", name = "bcprov-jdk18on", version.ref = "bouncycastle" }
+bouncycastle-bcpkix = { group = "org.bouncycastle", name = "bcpkix-jdk18on", version.ref = "bouncycastlePkix" }
 
 # SQLCipher
 sqlcipher-android = { group = "net.zetetic", name = "android-database-sqlcipher", version.ref = "sqlcipher" }

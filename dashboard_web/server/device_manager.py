@@ -31,12 +31,13 @@ class DeviceRegistry:
 
     def add_device(self, host: str, port: int = 8443,
                    token: str = "", device_id: str = "",
-                   name: str = "", paired: bool = False) -> ArtemisDevice:
+                   name: str = "", paired: bool = False,
+                   cert_fp: str = "") -> ArtemisDevice:
         key = f"{host}:{port}"
         dev = ArtemisDevice(
             host=host, port=port, token=token,
             device_id=device_id, name=name, paired=paired,
-            last_seen=time.time(),
+            last_seen=time.time(), cert_fp=cert_fp,
         )
         with self._lock:
             self._devices[key] = dev
@@ -87,21 +88,34 @@ class DeviceRegistry:
             key = f"{host}:8443"
             if key in self._devices:
                 continue
-            info = device_health(host, timeout=timeout)
+            info, pin = device_health(host, timeout=timeout)
             if info and info.get("status") == "ok":
-                dev = self.add_device(host, device_id=info.get("deviceName", host))
+                dev = self.add_device(
+                    host, device_id=info.get("deviceName", host),
+                    cert_fp=pin,
+                )
                 found.append((key, dev))
         return found
 
     def refresh_all(self):
-        """Ping all known devices and update online status."""
+        """Ping all known devices and update online status + TLS pin."""
         with self._lock:
             devices = list(self._devices.items())
         for key, dev in devices:
             try:
-                info = device_health(dev.host, port=dev.port, timeout=3.0)
+                info, pin = device_health(dev.host, port=dev.port,
+                                          timeout=3.0, cert_fp=dev.cert_fp or None)
                 if info and info.get("status") == "ok":
-                    self.update_device(key, last_seen=time.time())
+                    updates: dict[str, object] = {"last_seen": time.time()}
+                    # TOFU: capture the pin on first contact
+                    if not dev.cert_fp and pin:
+                        updates["cert_fp"] = pin
+                    self.update_device(key, **updates)
+                elif info and info.get("error") == "cert_mismatch":
+                    # Pin changed — possible MITM or device re-pair. Force
+                    # re-pair and log the mismatch loudly.
+                    self.update_device(key, paired=False, last_seen=dev.last_seen)
+                    print(f"[artemis] TLS PIN MISMATCH for {key} — device forced unpaired", flush=True)
                 else:
                     self.update_device(key, last_seen=dev.last_seen)  # keep old
             except:

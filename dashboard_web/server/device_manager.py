@@ -1,45 +1,82 @@
-"""Device registry — stores paired devices and manages discovery."""
-import json
-import socket
+"""Device registry — in-memory cache over the encrypted SQLite store (db.py).
+
+The registry is the dashboard's single view of every phone: pairing state,
+tokens, TLS pins, nicknames, and the per-device media catalogue (call
+recordings, videos, screen recordings, screenshots, photos). Persistence
+goes through server.db — the dashboard never needs the phone app running to
+read or write any of this state.
+"""
+from __future__ import annotations
+
 import threading
 import time
-from pathlib import Path
-from typing import Callable
-from . import config
-from .device_client import ArtemisDevice, health as device_health, refresh as device_refresh
+from dataclasses import dataclass, field
+from typing import Callable, Optional
+
+from . import db
+from .device_client import (
+    health as device_health,
+    refresh as device_refresh,
+)
+
+
+@dataclass
+class ArtemisDevice:
+    host: str
+    port: int = 8443
+    token: str = ""
+    device_id: str = ""
+    name: str = ""
+    paired: bool = False
+    last_seen: float = 0.0
+    cert_fp: str = ""
+    refresh_token: str = ""
+    expires_at: float = 0.0
+    nickname: str = ""
+    created_at: float = 0.0
+    # Runtime-only: never persisted. Set by health probes so the fleet UI can
+    # show ONLINE vs OFFLINE per device.
+    online: bool = True
 
 
 class DeviceRegistry:
-    """Manages known devices and network discovery."""
-
     def __init__(self):
-        self._devices: dict[str, ArtemisDevice] = {}  # key = "host:port"
+        self._devices: dict[str, ArtemisDevice] = {}
         self._lock = threading.Lock()
         self._discovery_callbacks: list[Callable[[str, ArtemisDevice], None]] = []
         self._load()
 
     def _load(self):
-        raw = config.load_devices()
-        with self._lock:
-            for key, data in raw.items():
-                self._devices[key] = ArtemisDevice(**data)
+        for key, data in db.get_devices().items():
+            data.pop("key", None)
+            self._devices[key] = ArtemisDevice(**data)
 
     def _save(self):
         with self._lock:
-            raw = {k: v.__dict__ for k, v in self._devices.items()}
-        config.save_devices(raw)
+            devices = list(self._devices.items())
+        for key, dev in devices:
+            data = {
+                "key": key, "host": dev.host, "port": dev.port,
+                "token": dev.token or "", "refresh_token": dev.refresh_token or "",
+                "cert_fp": dev.cert_fp or "", "device_id": dev.device_id or "",
+                "name": dev.name or "", "nickname": dev.nickname or "",
+                "paired": dev.paired, "last_seen": dev.last_seen,
+                "expires_at": dev.expires_at, "created_at": dev.created_at,
+            }
+            db.put_device(data)
 
     def add_device(self, host: str, port: int = 8443,
                    token: str = "", device_id: str = "",
                    name: str = "", paired: bool = False,
                    cert_fp: str = "", refresh_token: str = "",
-                   expires_at: float = 0.0) -> ArtemisDevice:
+                   expires_at: float = 0.0, nickname: str = "") -> ArtemisDevice:
         key = f"{host}:{port}"
         dev = ArtemisDevice(
             host=host, port=port, token=token,
             device_id=device_id, name=name, paired=paired,
             last_seen=time.time(), cert_fp=cert_fp,
             refresh_token=refresh_token, expires_at=expires_at,
+            nickname=nickname,
         )
         with self._lock:
             self._devices[key] = dev
@@ -51,7 +88,7 @@ class DeviceRegistry:
     def remove_device(self, key: str):
         with self._lock:
             self._devices.pop(key, None)
-        self._save()
+        db.delete_device(key)
 
     def get_device(self, key: str) -> ArtemisDevice | None:
         with self._lock:
@@ -77,7 +114,28 @@ class DeviceRegistry:
             for k, v in kwargs.items():
                 setattr(dev, k, v)
             dev.last_seen = time.time()
-        self._save()
+        db.update_device(key, **kwargs)
+
+    def set_nickname(self, key: str, nickname: str):
+        dev = self.get_device(key)
+        if not dev:
+            return
+        self.update_device(key, nickname=nickname.strip())
+
+    # ------------------------------------------------------------------
+    # Media catalogue (DB-only — no phone app required)
+    # ------------------------------------------------------------------
+
+    def list_media(self, key: str) -> list[dict]:
+        return db.list_media(key)
+
+    def add_media(self, key: str, kind: str, path: str = "", size_bytes: int = 0,
+                  duration_sec: float = 0.0, note: str = "") -> dict:
+        return db.add_media(key, kind, path=path, size_bytes=size_bytes,
+                            duration_sec=duration_sec, note=note)
+
+    def delete_media(self, media_id: int):
+        db.delete_media(media_id)
 
     def on_discovery(self, callback: Callable[[str, ArtemisDevice], None]):
         self._discovery_callbacks.append(callback)
@@ -123,7 +181,7 @@ class DeviceRegistry:
                     self.force_unpair(key, reason="TLS PIN MISMATCH")
                 else:
                     self.update_device(key, last_seen=dev.last_seen)  # keep old
-            except:
+            except Exception:
                 pass
 
     # ------------------------------------------------------------------
@@ -140,12 +198,15 @@ class DeviceRegistry:
             dev = self._devices.get(key)
             if not dev:
                 return
-            dev.token = None
+            dev.token = ""
             dev.refresh_token = ""
             dev.expires_at = 0.0
             dev.cert_fp = ""
             dev.paired = False
-        self._save()
+        db.update_device(
+            key, token="", refresh_token="", expires_at=0.0,
+            cert_fp="", paired=False,
+        )
         if reason:
             print(f"[artemis] {reason} for {key} — trust relationship deleted, re-pair required", flush=True)
 

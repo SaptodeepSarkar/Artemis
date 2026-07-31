@@ -50,83 +50,39 @@ from pathlib import Path
 DEFAULT_PORT = 8443
 DISCOVERY_PORT = 9090
 DISCOVERY_MAGIC = b'\x41'
-CONFIG_DIR = Path.home() / ".config" / "artemis"
-TOKEN_FILE = CONFIG_DIR / "tokens.json"
-KNOWN_HOSTS_FILE = CONFIG_DIR / "known_hosts.json"
 
 
-# ─── Token encryption at rest ──────────────────────────────────────────────
-# Shares the same Fernet key as the web dashboard (dashboard_store.key),
-# so phone bearer tokens are never stored in plaintext on disk.
+# ─── Shared encrypted SQLite store ─────────────────────────────────────────
+# Tokens and TOFU pins now live in the dashboard's artemis.db (Fernet-
+# encrypted at rest), not in JSON files under .config. The CLI reuses the
+# dashboard_web server package so there is exactly one store of truth.
 
-def _get_fernet():
-    from cryptography.fernet import Fernet
-    key_file = CONFIG_DIR / "dashboard_store.key"
-    if key_file.exists():
-        key = key_file.read_bytes().strip()
-    else:
-        key = Fernet.generate_key()
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        key_file.write_bytes(key)
-        os.chmod(key_file, 0o600)
-    return Fernet(key)
-
-
-def _encrypt(plain):
-    if not plain:
-        return plain
-    return "enc:" + _get_fernet().encrypt(plain.encode()).decode()
-
-
-def _decrypt(blob):
-    if not blob or not blob.startswith("enc:"):
-        return blob  # legacy plaintext passes through
-    try:
-        return _get_fernet().decrypt(blob[4:].encode()).decode()
-    except Exception:
-        return ""
+def _db():
+    import sys
+    pkg = Path(__file__).resolve().parent.parent / "dashboard_web"
+    if str(pkg) not in sys.path:
+        sys.path.insert(0, str(pkg))
+    from server import db
+    return db
 
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 
 def load_tokens():
-    """Load saved tokens from config file.
+    """Load saved tokens from the shared encrypted SQLite DB.
 
-    New format: {host: {"token": ..., "refresh_token": ..., "expires_at": ...}}
-    Legacy format: {host: "token-string"} — migrated in place.
+    Returns {host: {"token": ..., "refresh_token": ..., "expires_at": ...}}
+    (already decrypted — the DB handles encryption at rest).
     """
-    if TOKEN_FILE.exists():
-        try:
-            raw = json.loads(TOKEN_FILE.read_text())
-            out = {}
-            for host, val in raw.items():
-                if isinstance(val, dict):
-                    tok = _decrypt(val.get("token", ""))
-                    out[host] = {
-                        "token": tok,
-                        "refresh_token": _decrypt(val.get("refresh_token", "")),
-                        "expires_at": val.get("expires_at", 0.0),
-                    }
-                else:
-                    out[host] = {"token": _decrypt(val), "refresh_token": "", "expires_at": 0.0}
-            return out
-        except (json.JSONDecodeError, PermissionError):
-            return {}
-    return {}
+    try:
+        return _db().get_all_cli_tokens()
+    except Exception:
+        return {}
 
 
 def save_tokens(tokens):
-    """Save tokens to config file (encrypted at rest)."""
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    encrypted = {
-        host: {
-            "token": _encrypt(v.get("token", "")),
-            "refresh_token": _encrypt(v.get("refresh_token", "")),
-            "expires_at": v.get("expires_at", 0.0),
-        }
-        for host, v in tokens.items()
-    }
-    TOKEN_FILE.write_text(json.dumps(encrypted, indent=2))
+    """Save tokens to the shared encrypted SQLite DB (encrypted at rest)."""
+    _db().set_cli_tokens(tokens)
 
 
 def get_saved_token(host):
@@ -222,17 +178,14 @@ def _create_ssl_context():
 
 def _load_known_hosts():
     """host:port -> SHA256 pin for every device we've ever talked to (TOFU)."""
-    if KNOWN_HOSTS_FILE.exists():
-        try:
-            return json.loads(KNOWN_HOSTS_FILE.read_text())
-        except (json.JSONDecodeError, PermissionError, OSError):
-            pass
-    return {}
+    try:
+        return _db().get_known_hosts()
+    except Exception:
+        return {}
 
 
 def _save_known_hosts(pins):
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    KNOWN_HOSTS_FILE.write_text(json.dumps(pins, indent=2))
+    _db().replace_known_hosts(pins)
 
 
 def _pin_for(host, port):

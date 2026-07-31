@@ -144,9 +144,11 @@ forces the next refresh; nothing is deleted.
 ### 2.4 TOFU pinning
 
 - The pin (SHA-256 of the device certificate DER, `SHA256:<hex>`) is stored
-  at rest **encrypted** (Fernet) in `devices.json` / `known_hosts.json` /
-  `tokens.json`. Encrypting the pin closes the "attacker with read-only file
-  access swaps in their own pin" scenario.
+  at rest **encrypted** (Fernet) in `~/.config/artemis/artemis.db` — the
+  SQLite database that replaced the legacy `devices.json` / `known_hosts.json`
+  / `tokens.json` files (migrated once, then the JSON files are deleted).
+  Encrypting the pin closes the "attacker with read-only file access swaps in
+  their own pin" scenario.
 - Comparisons are constant-time (`hmac.compare_digest`).
 - On a mismatch the client **rejects the connection, deletes the entire
   trust relationship** (token, refresh token, pin), marks the device unpaired

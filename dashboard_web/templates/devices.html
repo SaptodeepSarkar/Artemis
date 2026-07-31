@@ -178,12 +178,20 @@
 {% endif %}
 <header class="flex justify-between items-start">
 <div>
-<h3 class="font-headline text-lg font-bold text-moon-silver truncate">{{ dev.name or dev.device_id or key }}</h3>
+<h3 class="font-headline text-lg font-bold text-moon-silver truncate">{{ dev.nickname or dev.name or dev.device_id or key }}</h3>
 <p class="font-label text-xs text-moon-silver/70 mt-1">{{ dev.host }}:{{ dev.port }}</p>
 </div>
 <div class="flex items-center gap-2">
-<span class="font-label text-[10px] text-moon-silver/60">{{ 'ONLINE' if dev.paired else 'UNPAIRED' }}</span>
-<div class="w-2 h-2 rounded-full {{ 'bg-maquis-green shadow-[0_0_4px_#4A7C59]' if dev.paired else 'bg-moon-silver/30' }}"></div>
+{% if dev.paired and dev.online %}
+<span class="font-label text-[10px] text-maquis-green">ONLINE</span>
+<div class="w-2 h-2 rounded-full bg-maquis-green shadow-[0_0_4px_#4A7C59]"></div>
+{% elif dev.paired %}
+<span class="font-label text-[10px] text-black">OFFLINE</span>
+<div class="w-2 h-2 rounded-full bg-black border border-moon-silver/30"></div>
+{% else %}
+<span class="font-label text-[10px] text-moon-silver/60">UNPAIRED</span>
+<div class="w-2 h-2 rounded-full bg-moon-silver/30"></div>
+{% endif %}
 </div>
 </header>
 <div class="flex-grow flex flex-col justify-center py-2">

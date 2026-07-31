@@ -158,9 +158,9 @@
 <div class="bg-surface-elevation/40 border border-moon-silver/10 rounded-lg p-5 flex flex-col justify-between hover:border-moon-silver/30 transition-colors backdrop-blur-sm" id="statusOnline">
 <div class="flex items-center justify-between mb-4">
 <span class="font-label text-xs text-moon-silver/50 tracking-widest">DEVICE STATUS</span>
-<span class="material-symbols-outlined text-maquis-green animate-pulse">wifi_tethering</span>
+<span class="material-symbols-outlined text-maquis-green animate-pulse" id="statusOnlineIcon">wifi_tethering</span>
 </div>
-<div class="font-headline text-2xl font-bold text-maquis-green value">—</div>
+<div class="font-headline text-2xl font-bold text-maquis-green value" id="statusOnlineValue">—</div>
 </div>
 <div class="bg-surface-elevation/40 border border-moon-silver/10 rounded-lg p-5 flex flex-col justify-between hover:border-moon-silver/30 transition-colors backdrop-blur-sm" id="statusBattery">
 <div class="flex items-center justify-between mb-4">
@@ -268,6 +268,22 @@
 <div class="data-row"><span>NO_DATA</span><span>ACQUIRE INFO</span></div>
 </div>
 <button onclick="loadDeviceInfo()" class="mt-4 self-end font-label text-xs tracking-widest text-moon-silver border border-moon-silver/30 px-4 py-2 hover:border-hunt-crimson hover:text-hunt-crimson transition-colors uppercase">Acquire Info</button>
+<!-- Captured Media Panel -->
+<div class="col-span-1 lg:col-span-3 bg-surface-elevation/40 border border-moon-silver/10 rounded-lg p-6 flex flex-col">
+<h3 class="font-headline text-lg font-bold text-on-surface flex items-center gap-2 mb-6">
+<span class="material-symbols-outlined text-sm">collections</span> CAPTURED MEDIA
+                    </h3>
+<div class="flex items-center gap-3 mb-6">
+<label class="font-label text-xs text-moon-silver/60 tracking-widest flex-1">DEVICE NICKNAME
+<input id="nicknameInput" class="mt-2 w-full bg-void-black border border-moon-silver/10 text-on-surface font-label text-sm py-2 px-3 focus:border-hunt-crimson transition-colors rounded" placeholder="e.g. Rekha's phone"/></label>
+<button onclick="saveNickname()" class="self-end font-label text-xs tracking-widest text-moon-silver border border-moon-silver/30 px-4 py-2 hover:border-hunt-crimson hover:text-hunt-crimson transition-colors uppercase">Rename</button>
+</div>
+<div class="flex flex-col gap-2 flex-1" id="mediaList">
+<div class="flex items-center gap-3 p-3 border border-moon-silver/10 rounded opacity-50">
+<span class="material-symbols-outlined text-sm text-moon-silver/60">hourglass_empty</span>
+<span class="font-label text-sm text-on-surface/60">LOADING...</span>
+</div>
+</div>
 </div>
 </div>
 </div>

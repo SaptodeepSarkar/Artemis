@@ -29,8 +29,13 @@ if not ADMIN_PASSWORD:
         password_file.write_text(ADMIN_PASSWORD)
         print(f"[config] Generated admin password: {ADMIN_PASSWORD}")
 
-# Devices file
-DEVICES_FILE = CONFIG_DIR / "devices.json"
+# Storage — SQLite database replaces the legacy JSON files.
+# The JSON paths below exist only as migration sources: on first run the
+# data is imported into artemis.db and the JSON files are deleted.
+DB_FILE = CONFIG_DIR / "artemis.db"
+DEVICES_FILE = CONFIG_DIR / "devices.json"       # legacy, migrated once
+TOKENS_FILE = CONFIG_DIR / "tokens.json"         # legacy (CLI), migrated once
+KNOWN_HOSTS_FILE = CONFIG_DIR / "known_hosts.json"  # legacy (CLI), migrated once
 
 # ---------------------------------------------------------------------------
 # Token encryption at rest.

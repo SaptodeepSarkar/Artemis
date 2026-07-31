@@ -52,22 +52,56 @@ CONFIG_DIR = Path.home() / ".config" / "artemis"
 TOKEN_FILE = CONFIG_DIR / "tokens.json"
 
 
+# ─── Token encryption at rest ──────────────────────────────────────────────
+# Shares the same Fernet key as the web dashboard (dashboard_store.key),
+# so phone bearer tokens are never stored in plaintext on disk.
+
+def _get_fernet():
+    from cryptography.fernet import Fernet
+    key_file = CONFIG_DIR / "dashboard_store.key"
+    if key_file.exists():
+        key = key_file.read_bytes().strip()
+    else:
+        key = Fernet.generate_key()
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        key_file.write_bytes(key)
+        os.chmod(key_file, 0o600)
+    return Fernet(key)
+
+
+def _encrypt(plain):
+    if not plain:
+        return plain
+    return "enc:" + _get_fernet().encrypt(plain.encode()).decode()
+
+
+def _decrypt(blob):
+    if not blob or not blob.startswith("enc:"):
+        return blob  # legacy plaintext passes through
+    try:
+        return _get_fernet().decrypt(blob[4:].encode()).decode()
+    except Exception:
+        return ""
+
+
 # ─── Configuration ───────────────────────────────────────────────────────────
 
 def load_tokens():
     """Load saved tokens from config file."""
     if TOKEN_FILE.exists():
         try:
-            return json.loads(TOKEN_FILE.read_text())
+            raw = json.loads(TOKEN_FILE.read_text())
+            return {host: _decrypt(tok) for host, tok in raw.items()}
         except (json.JSONDecodeError, PermissionError):
             return {}
     return {}
 
 
 def save_tokens(tokens):
-    """Save tokens to config file."""
+    """Save tokens to config file (encrypted at rest)."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    TOKEN_FILE.write_text(json.dumps(tokens, indent=2))
+    encrypted = {host: _encrypt(tok) for host, tok in tokens.items()}
+    TOKEN_FILE.write_text(json.dumps(encrypted, indent=2))
 
 
 def get_saved_token(host):

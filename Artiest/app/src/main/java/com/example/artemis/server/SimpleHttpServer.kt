@@ -3,6 +3,7 @@ package com.example.artemis.server
 import android.util.Log
 import com.example.artemis.ArtemisApp
 import com.example.artemis.auth.AuthManager
+import com.example.artemis.auth.PairedClient
 import com.example.artemis.auth.PairingCode
 import com.example.artemis.feature.CameraController
 import com.example.artemis.feature.DeviceInfoProvider
@@ -12,6 +13,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
@@ -171,9 +173,9 @@ class SimpleHttpServer(
         // Auth status
         router.get("/api/v1/auth/status") { authStatusHandler(it) }
 
-        // Clients
-        router.get("/api/v1/auth/clients") { clientsListHandler(it) }
-        router.delete("/api/v1/auth/clients/{id}") { clientRevokeHandler(it) }
+        // Clients — every request must carry a valid token
+        router.get("/api/v1/auth/clients") { requireAuth(it) { req -> clientsListHandler(req) } }
+        router.delete("/api/v1/auth/clients/{id}") { requireAuth(it) { req -> clientRevokeHandler(req) } }
 
         // Device info
         router.get("/api/v1/device/info") { requireAuth(it) { req -> deviceInfoHandler(req) } }
@@ -235,12 +237,20 @@ class SimpleHttpServer(
     }
 
     private fun regenerateCodeHandler(req: HttpRequest): HttpResponse {
-        val newCode = regeneratePairingCode()
-        Log.i("ArtemisServer", "Pairing code regenerated via API: $newCode")
-        return jsonResponse(200, mapOf(
-            "code" to newCode,
-            "expiresAt" to (app.currentPairingCode?.expiresAt ?: System.currentTimeMillis() + 300_000)
-        ))
+        // Security: only the phone itself may rotate the code. Any other
+        // host could otherwise force a rotation loop / pairing DoS.
+        val remote = req.remoteAddress
+        if (remote != "127.0.0.1" && remote != "localhost" && remote != "::1" && !remote.startsWith("127.")) {
+            Log.w("ArtemisServer", "Rejected pairing-code regeneration from non-loopback address $remote")
+            return jsonResponse(403, mapOf("error" to "forbidden", "message" to "Regeneration is only allowed from the device itself"))
+        }
+
+        // Rotate without ever exposing the code value in logs or the response.
+        // The phone UI reads the fresh code from in-process shared state.
+        val fresh = authManager.generatePairingCode()
+        pairingCode = fresh
+        app.currentPairingCode = fresh
+        return jsonResponse(200, mapOf("status" to "rotated"))
     }
 
     private fun pairHandler(req: HttpRequest): HttpResponse {
@@ -267,6 +277,18 @@ class SimpleHttpServer(
             )
         }
         val refreshToken = runBlocking { authManager.createRefreshToken(clientId) }
+
+        // Remember the paired client persistently — survives server restarts.
+        authManager.rememberPairedClient(
+            PairedClient(
+                clientId = clientId,
+                clientName = "Web Dashboard",
+                permissionScope = AuthManager.SCOPE_ADMIN,
+                pairedAt = System.currentTimeMillis(),
+                lastSeen = System.currentTimeMillis(),
+                isActive = true
+            )
+        )
 
         connectedClients++
 
@@ -325,11 +347,30 @@ class SimpleHttpServer(
     }
 
     private fun clientsListHandler(req: HttpRequest): HttpResponse {
-        return jsonResponse(200, mapOf("clients" to emptyList<Any>()))
+        val clients = authManager.getPairedClients()
+        val list = clients.map { c ->
+            mapOf(
+                "clientId" to c.clientId,
+                "clientName" to c.clientName,
+                "scope" to c.permissionScope,
+                "pairedAt" to c.pairedAt,
+                "lastSeen" to (c.lastSeen ?: 0L),
+                "isActive" to c.isActive
+            )
+        }
+        return jsonResponse(200, mapOf("clients" to list))
     }
 
     private fun clientRevokeHandler(req: HttpRequest): HttpResponse {
-        return jsonResponse(200, mapOf("status" to "revoked"))
+        val id = req.pathParams["id"]
+        if (id == null) {
+            return jsonResponse(400, mapOf("error" to "bad_request", "message" to "Missing client ID"))
+        }
+        val revoked = authManager.revokeClient(id)
+        if (!revoked) {
+            return jsonResponse(404, mapOf("error" to "not_found", "message" to "Client not found"))
+        }
+        return jsonResponse(200, mapOf("status" to "revoked", "clientId" to id))
     }
 
     private fun deviceInfoHandler(req: HttpRequest): HttpResponse {
@@ -511,13 +552,14 @@ class SimpleHttpServer(
 
     /**
      * Called by the UI (via service) to get a fresh pairing code.
-     * Returns the new 6-digit code string.
+     * Rotates to a new 6-digit code; the value is only ever shown
+     * on the phone screen — never logged and never in network responses.
      */
     fun regeneratePairingCode(): String {
         val code = authManager.generatePairingCode()
         pairingCode = code
         app.currentPairingCode = code
-        Log.i("ArtemisServer", "Pairing code regenerated: ${code.code}")
+        Log.i("ArtemisServer", "Pairing code regenerated (screen-only)")
         return code.code
     }
 
@@ -537,10 +579,22 @@ class SimpleHttpServer(
             // Generate initial pairing code and publish to shared state
             pairingCode = authManager.generatePairingCode()
             app.currentPairingCode = pairingCode
-            Log.i("ArtemisServer", "Initial pairing code: ${pairingCode?.code}")
 
             serverScope.launch {
                 acceptLoop()
+            }
+
+            // Rotate the pairing code every 5 minutes so a stale code
+            // can never be used for pairing later.
+            serverScope.launch {
+                while (serverScope.isActive) {
+                    delay(AuthManager.PAIRING_CODE_EXPIRY_MS)
+                    if (!serverScope.isActive) break
+                    val fresh = authManager.generatePairingCode()
+                    pairingCode = fresh
+                    app.currentPairingCode = fresh
+                    Log.i("ArtemisServer", "Pairing code rotated (new code shown on screen only)")
+                }
             }
 
             Log.i("ArtemisServer", "Server started successfully on port $port")

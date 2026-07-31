@@ -1,5 +1,6 @@
 package com.example.artemis.auth
 
+import android.content.SharedPreferences
 import android.util.Base64
 import com.example.artemis.ArtemisApp
 import kotlinx.coroutines.Dispatchers
@@ -46,6 +47,80 @@ class AuthManager(private val app: ArtemisApp) {
 
     private val activeTokens = mutableMapOf<String, AuthToken>()
     private val revokedTokens = mutableSetOf<String>()
+    private val pairedClients = mutableMapOf<String, PairedClient>()
+    private val stateLock = Any()
+
+    init {
+        loadPersistedState()
+    }
+
+    // ------------------------------------------------------------------
+    // Persistence — paired clients + revocations survive server restarts.
+    // HMAC key already lives in AndroidKeyStore (persists across restarts),
+    // so previously-issued tokens keep validating automatically.
+    // ------------------------------------------------------------------
+
+    private fun prefs(): SharedPreferences = app.encryptedPreferences
+
+    private fun loadPersistedState() {
+        try {
+            val clientsJson = prefs().getString(KEY_PAIRED_CLIENTS, null)
+            if (clientsJson != null) {
+                val list = json.decodeFromString<List<PairedClient>>(clientsJson)
+                list.forEach { pairedClients[it.clientId] = it }
+            }
+            val revokedJson = prefs().getString(KEY_REVOKED_TOKENS, null)
+            if (revokedJson != null) {
+                revokedTokens.addAll(json.decodeFromString<List<String>>(revokedJson))
+            }
+        } catch (e: Exception) {
+            // Corrupt store — start fresh rather than crash
+        }
+    }
+
+    private fun persistPairedClients() {
+        try {
+            val list = pairedClients.values.toList()
+            prefs().edit().putString(KEY_PAIRED_CLIENTS, json.encodeToString(list)).apply()
+        } catch (_: Exception) { }
+    }
+
+    private fun persistRevokedTokens() {
+        try {
+            prefs().edit().putString(KEY_REVOKED_TOKENS, json.encodeToString(revokedTokens.toList())).apply()
+        } catch (_: Exception) { }
+    }
+
+    fun rememberPairedClient(client: PairedClient) {
+        synchronized(stateLock) {
+            pairedClients[client.clientId] = client
+            persistPairedClients()
+        }
+    }
+
+    fun getPairedClients(): List<PairedClient> {
+        synchronized(stateLock) {
+            return pairedClients.values.sortedByDescending { it.pairedAt }
+        }
+    }
+
+    fun revokeClient(clientId: String): Boolean {
+        synchronized(stateLock) {
+            val client = pairedClients[clientId] ?: return false
+            pairedClients[clientId] = client.copy(isActive = false)
+            persistPairedClients()
+            return true
+        }
+    }
+
+    fun unrevokeClient(clientId: String): Boolean {
+        synchronized(stateLock) {
+            val client = pairedClients[clientId] ?: return false
+            pairedClients[clientId] = client.copy(isActive = true)
+            persistPairedClients()
+            return true
+        }
+    }
 
     companion object {
         const val TOKEN_EXPIRY_MS = 24 * 60 * 60 * 1000L
@@ -63,6 +138,8 @@ class AuthManager(private val app: ArtemisApp) {
 
         private const val HMAC_ALGORITHM = "HmacSHA256"
         private const val TOKEN_VERSION = "AT1"
+        private const val KEY_PAIRED_CLIENTS = "paired_clients"
+        private const val KEY_REVOKED_TOKENS = "revoked_tokens"
     }
 
     fun generatePairingCode(): PairingCode {
@@ -144,6 +221,7 @@ class AuthManager(private val app: ArtemisApp) {
             val parts = tokenString.split(".")
             if (parts.size == 3) {
                 revokedTokens.add(parts[1])
+                persistRevokedTokens()
                 try {
                     val payloadBytes = Base64.decode(parts[1], Base64.URL_SAFE or Base64.NO_PADDING)
                     val token = json.decodeFromString<AuthToken>(String(payloadBytes))

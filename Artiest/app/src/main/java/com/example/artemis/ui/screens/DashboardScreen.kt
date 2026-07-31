@@ -104,7 +104,9 @@ fun DashboardScreen(
         scope.launch {
             isRefreshingCode = true
             try {
-                // Call the server directly via in-process reference
+                // Rotate via the local server (loopback-only endpoint).
+                // The response never contains the code — read it from
+                // in-process shared state, which the server just updated.
                 val url = java.net.URL("http://127.0.0.1:$SERVER_PORT/api/v1/auth/pair/regenerate")
                 val conn = url.openConnection() as java.net.HttpURLConnection
                 conn.connectTimeout = 2000
@@ -114,17 +116,15 @@ fun DashboardScreen(
                 conn.outputStream.write("{}".toByteArray())
                 val responseCode = conn.responseCode
                 if (responseCode == 200) {
-                    val body = conn.inputStream.bufferedReader().readText()
-                    val json = org.json.JSONObject(body)
-                    pairingCode = json.getString("code")
-                    android.util.Log.i("Dashboard", "Pairing code regenerated via server: $pairingCode")
+                    conn.inputStream.bufferedReader().readText()
                 }
                 conn.disconnect()
             } catch (e: Exception) {
                 android.util.Log.w("Dashboard", "Could not regenerate pairing code: ${e.message}")
-                // Fallback: read from shared state
-                pairingCode = ArtemisApp.instance.currentPairingCode?.code
             }
+            // Always read the fresh code from shared state (server may have
+            // rotated it on its own; shared state is the single source of truth).
+            pairingCode = ArtemisApp.instance.currentPairingCode?.code
             isRefreshingCode = false
         }
     }
@@ -153,16 +153,15 @@ fun DashboardScreen(
         delay(3000)
         // Read code from shared in-process state — no network call
         pairingCode = ArtemisApp.instance.currentPairingCode?.code
-        if (pairingCode != null) {
-            android.util.Log.i("Dashboard", "Read pairing code from shared state: $pairingCode")
-        } else {
-            android.util.Log.w("Dashboard", "No pairing code in shared state yet")
-        }
+        android.util.Log.i("Dashboard", if (pairingCode != null) "Pairing code available on screen" else "No pairing code in shared state yet")
     }
 
     // ---- periodic poll of connected clients while service is running ----
     LaunchedEffect(isServiceRunning) {
         while (isServiceRunning) {
+            // Follow the 5-minute server-side rotation: the code shown on
+            // screen must always match the code the server will accept.
+            pairingCode = ArtemisApp.instance.currentPairingCode?.code
             // connectedClients would be updated by server events
             delay(5_000L)
         }
@@ -389,7 +388,7 @@ private fun PairingCodeCard(
 
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-                text = "Share this code with the Artemis desktop app to pair.",
+                text = "Share this code with the Artemis desktop app to pair. Code rotates every 5 minutes.",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

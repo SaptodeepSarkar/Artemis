@@ -1,160 +1,195 @@
-# Artemis Sentinel — Project Handoff
+# Artemis Sentinel — AGENTS.md
 
-## Current State (2026-07-30 v1.2.0)
+> Current: **v2.2.0** (2026-08-01). Read this first, then `docs/SECURITY.md`
+> (threat model), then `docs/handoff.md` (the current phase brief for the
+> next agent). This file is the durable project reference; the phase brief
+> lives in `handoff.md`.
 
-### What Works
-- **Build**: Gradle 9.5.0 + AGP 9.3.1 + Kotlin 2.2.10. `./gradlew assembleDebug` succeeds.
-- **APK**: installed on Samsung Galaxy M51 (Android 13).
-- **Raw ServerSocket HTTP server**: binds to `0.0.0.0:8443`, serves all endpoints correctly.
-- **Health endpoint**: `GET /api/v1/health` — 200 OK with device info
-- **Pairing flow**: `GET /api/v1/auth/pairing-code` → server returns code (doesn't regenerate if valid) → `POST /api/v1/auth/pair` → returns token + refreshToken
-- **Authenticated endpoints**: `GET /api/v1/device/info`, `GET /api/v1/location/current`, etc. — Bearer token validation via HMAC-SHA256 (AndroidKeyStore)
-- **Dashboard CLI**: `python3 artemis.py pair --code --save`, `info`, `location` all functional
-- **Pairing code sync**: Phone fetches the server's actual pairing code (no more SecureRandom fallback)
-- **Logging**: Extensive `android.util.Log` at every step (tags: ArtemisApp, Dashboard, ArtemisSvc, ArtemisServer).
+---
 
-### What's Still Rough
-- **Service dies on nav**: `startForegroundService()` used but no `bindService()`. When user leaves app and returns, service state is unknown.
-- **No boot receiver**: Server dies on phone restart. No `BOOT_COMPLETED` receiver.
-- **No permanent pairing**: Tokens stored in memory-only `activeTokens` map. Restart = all pairings lost.
-- **No multi-device**: PC can only manage one phone at a time.
-- **CLI not web**: Dashboard is a Python CLI, not a browser UI.
-- **Camera/Mic untested**: Endpoints exist but need runtime permissions, not fully verified.
-- **Saved token fragile**: keyed by IP, breaks when phone IP changes.
+## 1. What this project is
 
-## v2.0 Architecture — Multi-Device RAT with Web Dashboard
+Artemis Sentinel is a self-hosted Android monitoring / remote-control
+system ("RAT" in the project's own terms) with three parts:
 
-The goal is an infrastructure where:
-- Many Android phones run the Artemis app (foreground service always alive)
-- A desktop web dashboard discovers, pairs with, and controls all phones
-- Heavy operations (camera, mic, screen) spawn on-demand foreground services, not 24/7
-
-```
-┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-│ Phone A (M51)│  │ Phone B (X)  │  │ Phone C (X)  │
-│ Server :8443 │  │ Server :8443 │  │ Server :8443 │
-│ ┌── ALWAYS ─┐│  │ ┌── ALWAYS ─┐│  │ ┌── ALWAYS ─┐│
-│ │ Base Srv  ││  │ │ Base Srv  ││  │ │ Base Srv  ││
-│ │ (location)││  │ │ (location)││  │ │ (location)││
-│ └───────────┘│  │ └───────────┘│  │ └───────────┘│
-│              │  │              │  │              │
-│ ┌── ON DEMAND─┐│  │ ┌── ON DEMAND─┐│  │ ┌── ON DEMAND─┐│
-│ │ Camera FGS ││  │ │ Camera FGS ││  │ │ Camera FGS ││
-│ │ Mic FGS    ││  │ │ Mic FGS    ││  │ │ Mic FGS    ││
-│ │ Screen FGS ││  │ │ Screen FGS ││  │ │ Screen FGS ││
-│ └────────────┘│  │ └────────────┘│  │ └────────────┘│
-└──────┬───────┘  └──────┬───────┘  └──────┬───────┘
-       │                 │                 │
-       └─────────────────┼─────────────────┘
-                         │ LAN / Tailscale
-               ┌─────────▼─────────┐
-               │ PC Web Dashboard  │
-               │ Flask/FastAPI     │
-               │ ┌───────────────┐ │
-               │ │ Phone Map     │ │
-               │ │ Phone Cards   │ │
-               │ │ → Camera on   │ │
-               │ │ → Mic on      │ │
-               │ │ → Screen view │ │
-               │ │ → Location    │ │
-               │ │ → Recordings  │ │
-               │ │ → File system │ │
-               │ └───────────────┘ │
-               └───────────────────┘
-```
-
-### v2.0 Milestones
-
-#### Milestone A: Service Resiliency (HIGH)
-- [ ] Add `BOOT_COMPLETED` BroadcastReceiver to auto-start service on phone reboot
-- [ ] Add AlarmManager watchdog: periodic check (every 60s) that service is alive, restart if dead
-- [ ] Add `bindService()` in MainActivity so service survives navigation
-- [ ] Make server port configurable (avoid conflicts with multiple phones on same LAN)
-
-#### Milestone B: Permanent Pairing (HIGH)
-- [ ] Persist paired clients in SQLite on phone (`paired_clients` table)
-- [ ] PC generates a permanent device identity on first launch (saved in `~/.config/artemis/id.json`)
-- [ ] One-time pairing flow:
-  1. PC sends its public identity to phone via pairing code
-  2. Phone stores PC identity + issues persistent token
-  3. PC stores phone fingerprint + token
-  4. Future connections: PC presents its identity → phone recognizes it → auto-auth, no code
-- [ ] Pairing code hidden behind "Show Code" button (not displayed by default)
-
-#### Milestone C: Multi-Phone Dashboard (HIGH)
-- [ ] Replace CLI with Flask web app serving on `http://0.0.0.0:5000`
-- [ ] LAN discovery via UDP broadcast (phone announces itself, dashboard discovers)
-- [ ] Dashboard shows all discovered phones as cards on a map
-- [ ] Click a phone → see: location on map, recent activity, controls
-- [ ] WebSocket for live updates (location stream, status changes)
-
-#### Milestone D: On-Demand Spawning (MEDIUM)
-- [ ] Base server stays lightweight: location polling + heartbeat + auth
-- [ ] When dashboard requests camera → phone spawns `CameraForegroundService` (new process)
-- [ ] When dashboard requests mic → phone spawns `MicForegroundService`
-- [ ] When dashboard requests screen → phone spawns `ScreenCastService` (MediaProjection)
-- [ ] Services stop when dashboard disconnects or after configurable timeout
-- [ ] Add rate limiting per-client to prevent battery drain attacks
-
-#### Milestone E: Dashboard Features (MEDIUM)
-- [ ] Real-time location on map (Leaflet/MapLibre)
-- [ ] Location history with timeline slider
-- [ ] Camera live feed (photo capture at N fps or HLS stream)
-- [ ] Microphone: start/stop recording + download
-- [ ] Screen: screenshot + streaming
-- [ ] File browser: list files, download/upload
-- [ ] Call recordings: list, play, download
-- [ ] Contacts: read and search
-- [ ] SMS: read (if permission granted)
-- [ ] Battery alerts, offline detection
-
-### Files to Focus On
-
-| File | Purpose | Priority |
+| Part | Where | Role |
 |---|---|---|
-| `.../server/SimpleHttpServer.kt` | Raw HTTP server — core of all communication | HIGH |
-| `.../auth/AuthManager.kt` | Token gen/validation, pairing logic | HIGH |
-| `.../service/ArtemisSentinelService.kt` | Foreground service lifecycle | HIGH |
-| `.../ui/screens/DashboardScreen.kt` | Phone UI — pairing code display | MEDIUM |
-| `.../receiver/BootReceiver.kt` | NEW: auto-start on boot | HIGH |
-| `.../receiver/WatchdogAlarm.kt` | NEW: keep-alive watchdog | HIGH |
-| `.../db/PairedClientsDb.kt` | NEW: SQLite for paired clients | HIGH |
-| `dashboard/artemis.py` | Deprecate — replace with Flask web app | MEDIUM |
-| `dashboard/web/` | NEW: Flask web dashboard | MEDIUM |
+| **Phone app** | `Artiest/` (Gradle, Kotlin, package `com.example.artemis`) | Raw `ServerSocket` + TLS HTTPS server on **:8443**; foreground service keeps it alive 24/7; pairing via 6-digit code |
+| **Web dashboard** | `dashboard_web/` (FastAPI/Starlette, `python3 main.py`, port 5000) | Fleet view, per-device controls, media catalogue, encrypted SQLite store |
+| **CLI** | `dashboard/artemis.py` | Pairs, queries, downloads from the terminal; shares the dashboard DB |
 
-### Build Commands
-```bash
-export JAVA_HOME=/opt/android-studio/jbr
-export ANDROID_HOME=$HOME/Android/Sdk
-export GRADLE_OPTS="-Djava.version=21"
-cd ~/Projects/Artemis/Artiest
-./gradlew assembleDebug
-adb install -r app/build/outputs/apk/debug/app-debug.apk
-adb shell am force-stop com.example.artemis
-adb shell am start -n com.example.artemis/.MainActivity
-```
+The phone server is the heart: every capability (location, camera, mic,
+call logs, SMS, video, admin lock) is an authenticated HTTP endpoint on
+`:8443` behind the TLS + TOFU-pin client stack.
 
-### Logcat Filter for Debugging
-```bash
-adb logcat -s ArtemisApp:V Dashboard:V ArtemisSvc:V ArtemisServer:V
-```
+## 2. Current state (v2.2.0 — shipped, live-verified)
 
-### Test Connection (from desktop)
-```bash
-python3 -c "
-import socket, time
-s = socket.socket(); s.settimeout(5)
-s.connect(('<phone-ip>', 8443))
-s.send(b'GET /api/v1/health HTTP/1.0\r\nHost: <phone-ip>\r\nConnection: close\r\n\r\n')
-time.sleep(1); print(s.recv(4096).decode()); s.close()
-"
-```
+### 2.1 The security backbone (DONE, FROZEN — do not touch)
 
-### Key Learnings (don't repeat these mistakes)
-1. **Netty on Android 13 Samsung**: `noKeySetOptimization=true` and `noUnsafe=true` prevent crashes but don't fix silent failure. Raw `ServerSocket` is the reliable choice.
-2. **CIO engine**: Accepts TCP, never processes HTTP on Samsung Android 13.
-3. **`kotlinx.serialization` and `Map<String, Any?>`**: `Json.encodeToString(dataMap)` throws because `Any` isn't `@Serializable`. Build JSON manually with `buildJsonObject()`.
-4. **`Build.getSerial()`**: Throws `SecurityException` on Android 10+ without `READ_PHONE_STATE`. Always wrap in try-catch.
-5. **LaunchedEffect execution order**: In Compose, `LaunchedEffect(Unit)` runs during first composition. If it fetches from a server that hasn't started yet, it'll fail silently. Start service first, THEN fetch.
-6. **Pairing code must be server-authoritative**: Never let the UI generate its own code. The server is the source of truth.
-7. **AGP 9.3.1**: Built-in Kotlin compilation. Do NOT apply `kotlin-android` Gradle plugin (conflicts with Gradle 9.5 `kotlin-dsl`).
+- TLS 1.3 default on the phone server; restricted 1.2 fallback
+  (ECDHE+AEAD) for old Android. Phone TLS key = **BouncyCastle software
+  RSA-2048 PKCS12** — AndroidKeyStore RSA fails every Conscrypt handshake
+  on Samsung (error 04000044). AndroidKeyStore is used only for the
+  pairing HMAC.
+- TOFU pinning: SHA-256 of cert DER, constant-time compare; mismatch →
+  reject + delete full trust → re-pair required. Dashboard and CLI both pin.
+- Token lifecycle: access 1h, rotating refresh 30d, 60s grace, replay →
+  revoke + purge. Expiry never unregisters.
+- Pairing: 6-digit code, rotates 5 min + per pair + on app restart; never
+  logged or networked. Pairing survives `install -r` (keystore persists).
+- Lockout: 5 fails/IP → 429, cap 5 min; 120 req/min/IP (loopback exempt).
+- Dashboard store: encrypted SQLite at `~/.config/artemis/artemis.db`
+  (Fernet `dashboard_store.key`, `enc:` prefix on secrets). Legacy JSON
+  migrated once then deleted. `.config` holds only db + key + admin password.
+
+### 2.2 Features (all live on the phone)
+
+| Endpoint group | Status |
+|---|---|
+| `/api/v1/health`, `/health` | ✓ version, uptime |
+| `/api/v1/device/info` (+ battery/network/storage) | ✓ |
+| `/api/v1/location/current`, `/history` | ✓ |
+| `/api/v1/camera/*` (list, capture, captures, file) | ✓ |
+| `/api/v1/mic/record/*` (start/stop/recordings/file) | ✓ |
+| `/api/v1/logs/calls`, `/api/v1/sms` | ✓ |
+| `/api/v1/callrecorder/*`, `/api/v1/callrecordings/*` | ✓ |
+| `/api/v1/video/record`, `/list`, `/{id}`, `/{id}/file` | ✓ |
+| `/api/v1/admin/lock` (device-admin lockNow) | ✓ |
+| Screen recording / screenshots | ✗ NOT built (MediaProjection needs per-session consent on Android 10+) |
+| File browser (list/download/upload) | ✗ NOT built |
+
+### 2.3 24/7 persistence (v2.2.0 — live-verified)
+
+- **Battery-optimization exemption**: in-app prompt +
+  `dumpsys deviceidle whitelist +com.example.artemis`; entry survives
+  `install -r`.
+- **Indefinite wake lock** while the server runs (the old 4h cap let Doze
+  take over).
+- **Doze-exit re-arm**: `DozeRecoveryReceiver` registered **dynamically
+  from the running FGS** (manifest receivers for USER_PRESENT/SCREEN_ON
+  cannot execute on Android 12+ for backgrounded apps). On
+  SCREEN_ON / USER_PRESENT / power / connectivity events it TCP-probes
+  `127.0.0.1:8443` and restarts the service if the socket is dead.
+  Startup grace 10s + restart cooldown 30s suppress boot-window false
+  restarts.
+- **Boot auto-start**: `BootReceiver` starts the service on BOOT_COMPLETED
+  (logs `fired` / `start() returned OK` / `start() FAILED: <msg>`).
+  VERIFIED: reboot → `BootReceiver: fired` → `Server startup complete` →
+  `/api/v1/health` 200, no app open. Note: on a PIN-locked phone
+  BOOT_COMPLETED fires only after first unlock (~1 min delay). Samsung's
+  Sleeping/deep-sleeping lists block boot delivery — keep the app out of
+  them (check `settings get secure sleeping_apps`).
+- **Zombie-socket fix**: `onDestroy` unregisters the receiver and closes
+  the ServerSocket (a leak here left a dead-but-claimed socket).
+
+### 2.4 Admin / uninstall protection (v2.1.0)
+
+- `AdminReceiver` (DeviceAdminReceiver, force-lock policy): when active,
+  Android refuses uninstall. Activation intent must NEVER set
+  `FLAG_ACTIVITY_NEW_TASK` (AOSP DeviceAdminAdd finishes instantly with a
+  blank flash when the calling activity is null).
+- `NotificationGuardListener` (NotificationListenerService) auto-dismisses
+  the PackageInstaller "uninstalling … unsuccessful" notification —
+  universal match on channel (contains `uninstall` + `fail`), no OEM
+  package whitelist. Grant via `cmd notification allow_listener`.
+
+### 2.5 Branding
+
+"Hunter's Crescent": Moon Silver `#C8C9D0` crescent, Hunt Crimson
+`#B8323A` accent, Void Black `#0A0A0F` background. Launcher icon + dashboard
+favicon (`/static/favicon.svg`, hardcoded path — `url_for('static')` raises
+`NoMatchFound` on this Starlette).
+
+## 3. Architecture and conventions
+
+### 3.1 Phone server pattern (`Artiest/.../server/SimpleHttpServer.kt`)
+
+- Raw `ServerSocket` on **0.0.0.0:8443**, TLS via `TlsManager`.
+- Worker-per-connection: the accept loop spawns a coroutine per
+  connection; each request is dispatched through a router.
+- Route registration: `router.get("/api/v1/health") { ... }`,
+  `router.post(...)`, etc. Authenticated routes wrap the handler in
+  `requireAuth(it) { req -> handler(req) }`.
+- Handlers return `HttpResponse`; JSON via `jsonResponse(...)`, binary via
+  `HttpResponse.binaryBody`.
+- **FROZEN SECTOR — DO NOT TOUCH**: `AuthManager.kt`, `TlsManager.kt`, and
+  the security enforcement inside `SimpleHttpServer.kt` (token/pin
+  verification, pairing-code handling, lockout, rate limiting, constant-time
+  compares). ADDING new endpoints is expected; modifying existing auth logic
+  is forbidden. Same for `dashboard_web/server/device_client.py` and
+  `dashboard/artemis.py` auth paths.
+- If a fix seems to REQUIRE touching the frozen sector, STOP and report.
+
+### 3.2 Feature classes (`Artiest/.../feature/`)
+
+One provider class per capability: `LocationTracker`, `CameraController`,
+`MicController`, `CallRecorder`, `VideoRecorder`, `CallLogsProvider`,
+`SmsProvider`, `DeviceInfoProvider`, `RemoteControlService`. Handlers in
+`SimpleHttpServer` call these. Permissions go through
+`permissions/PermissionManager.kt`.
+
+### 3.3 The next phase (helpers)
+
+See `docs/handoff.md` — build server-callable helpers (location, camera
+feed, screen, files/assets) that the server can invoke **even when the app
+UI is not open** (FGS-only, no Activity dependency).
+
+## 4. Environment & build
+
+- Phone: Samsung Galaxy M51 (SM-M515F), Android 12 / API 31. Reachable at
+  **100.91.166.21:8443** (Tailscale) and **192.168.0.102:8443** (WiFi).
+- adb: wireless debugging, **port drifts every session** — always
+  `adb devices -l` first; reconnect via the phone's Wireless-debugging
+  screen (ports usually 30k–50k).
+- Build (in `Artiest/`):
+  ```
+  JAVA_HOME=/opt/android-studio/jbr GRADLE_OPTS="-Djava.version=21" \
+    ./gradlew :app:assembleDebug --console=plain -q
+  ```
+  ANDROID_HOME unset; SDK at `~/Android/Sdk`; aapt2 at
+  `~/Android/Sdk/build-tools/36.0.0/aapt2`. APK:
+  `Artiest/app/build/outputs/apk/debug/app-debug.apk`.
+- Install: `adb -s <ip:port> install -r app-debug.apk` (pairing +
+  whitelist survive).
+- Dashboard: `cd dashboard_web && python3 main.py` (NOT `python3 -m
+  server`). Python 3.12, PEP 668 — venv or `--break-system-packages`.
+- No canonical test suite: verification = `assembleDebug` + ad-hoc
+  Python/shell checks + live logcat/dumpsys. Version alignment: tag =
+  versionName = versionCode = `docs/SECURITY.md` header.
+- Log tags: `ArtemisSvc`, `ArtemisServer`, `BootReceiver`, `DozeRecovery`,
+  `ArtemisGuard`, `ArtemisApp`.
+
+## 5. Live-test gotchas (learned the hard way)
+
+- **Samsung M51 freezer**: app sockets freeze in Doze AND when the PIN
+  keyguard is up; loopback tests time out at TLS handshake. Unlock +
+  foreground the app to re-test.
+- `svc wifi disable` kills adb-over-wifi — never test connectivity that way.
+- `am broadcast SCREEN_ON` from shell is denied — use `input keyevent 26`
+  (real power button) to test screen-on re-arm.
+- The phone's `HttpURLConnection` REQUIRES `\r\n` line endings —
+  `StringBuilder.appendLine()` emits `\n` → silent connection failures.
+  Use explicit `\r\n` in `sendHttpResponse()`.
+- Dashboards auto-start the service from `MainActivity` (LaunchedEffect) —
+  isolate receiver tests with HOME first, or the auto-start masks results.
+- Tool output redacts secret-like strings (`Authorization: Bearer ***`);
+  verify with python hex when in doubt.
+- `pkill -f` patterns self-match the shell — bracket trick:
+  `pkill -f "uvicorn [s]erver"`.
+
+## 6. Version history
+
+- **v2.2.0** (`deb8b11`, tag `v2.2.0`) — 24/7 persistence: battery-opt
+  exemption, dynamic Doze-exit re-arm, indefinite wake lock, zombie-socket
+  fix, boot auto-start (live-verified after reboot).
+- **v2.1.0** (`9e53328`, tag `v2.1.0`) — device-admin uninstall
+  protection, uninstall-failure notification guard, Artemis branding
+  (icon, favicon).
+- **v2.0.0** (tag `v2.0.0`) — background persistence, camera pull, call
+  logs, SMS, call/video/mic recorders, admin dashboard UI.
+- **v1.4.1** (`577cad6`, tag `v1.4.1`) — TLS 1.3 + TOFU + rotating
+  tokens + pairing hardening; Bearer-`***` bug fix.
+- Earlier: encrypted-SQLite dashboard store, CLI/DB unification.
+
+Commit convention: messages always `v(version):(message)`; commit + push
+on phase completion; work tree clean between phases.

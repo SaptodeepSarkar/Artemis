@@ -1,10 +1,9 @@
 # Artemis Sentinel — Agent Handoff
 
-> Written 2026-07-31 (v1.4.1 + encrypted-SQLite dashboard phase).
-> Read this FIRST, then `docs/SECURITY.md` (full threat model), then the
-> per-module READMEs. It tells you how to regain context in ~10 minutes,
-> what is done, and what the next phase (v2.0.0 — background persistence,
-> feature fixes, admin-grade UI) looks like.
+> Written 2026-07-31 (v2.0.0 phase: background persistence, feature fixes,
+> admin-grade UI). Read this FIRST, then `docs/SECURITY.md` (full threat
+> model), then the per-module READMEs. It tells you how to regain context in
+> ~10 minutes, what is done, and what the next phase looks like.
 
 ---
 
@@ -145,9 +144,97 @@ successful pair, and on app restart. Never logged, never sent over the wire.
   app foregrounded).
 - `/tmp/artemis_cfg_backup/` — pre-migration copy of the three JSON files.
 
+### 2.4 v2.0.0 phase (tag `v2.0.0`, pushed)
+
+**Scope: keep the app alive in the background, fix the capture features, and
+make the app an admin-grade surface. The communication sector (auth/TLS/
+pairing, client auth paths) was NOT touched — new endpoints were ADDED only.**
+
+Phone app (`Artiest/`, versionCode 3 / versionName 2.0.0):
+- **Background persistence hardened**: `onTaskRemoved()` now explicitly
+  re-arms the service when the user swipes the app away (START_STICKY +
+  stopWithTask=false as the fallback); `HealthCheckWorker` is now a real
+  liveness check (verifies the server socket + process state, restarts the
+  service if dead, 15-min periodic); battery-optimization exemption wired
+  into SettingsScreen (`ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`,
+  manifest permission added); notification shows server uptime + v2.0.0.
+- **Camera fixed for dashboard pulls**: new `GET /api/v1/camera/captures/{id}/file`
+  (JPEG bytes), captures persist on disk and are re-scanned on restart,
+  capture serialized via a shared camera mutex (photo vs video), front/back
+  camera ids accept "front"/"back"/"0"/"1".
+- **Call logs**: `GET /api/v1/logs/calls?limit=N` (CallLog provider,
+  READ_CALL_LOG) — number, cached name, type, duration, date.
+- **SMS**: `GET /api/v1/sms?box=&limit=&includeBody=1` (Telephony provider,
+  READ_SMS) — bodies REDACTED unless includeBody=1.
+- **Call recorder**: `CallRecorder` (TelephonyManager LISTEN_CALL_STATE +
+  MediaRecorder, MIC source fallback — VOICE_CALL is silenced on Samsung),
+  runs inside the FGS; `.m4a` stored in filesDir; status/toggle/list/file
+  endpoints.
+- **Video recorder**: `VideoRecorder` (CameraX VideoCapture, HD quality,
+  duration-limited), `.mp4` in filesDir; record/list/get/file endpoints.
+- **Mic**: recordings now converted to playable WAV on stop; file endpoint.
+- **Admin UI**: `DashboardScreen` rewritten — dark admin theme, server status
+  header (up/down, uptime, version), restyled pairing card (flow frozen),
+  feature grid with live controls (camera capture, video record 5s, mic
+  record/stop, call-recorder toggle, location, info), all driven over the
+  loopback-exempt HTTP endpoints. SettingsScreen: battery-opt exemption
+  request + version 2.0.0.
+- HTTP responses now support binary bodies (`HttpResponse.binaryBody`).
+
+Dashboard (`dashboard_web/`):
+- **Bearer-`***` bug fixed** (device_client.py): dashboard↔phone calls were
+  sending a literal `***` Authorization header (effectively unauthenticated
+  since v1.x). Now sends the real stored token. **This was the actual root
+  cause of "nothing works except location + device info".**
+- New routes: `GET .../logs/calls`, `GET .../sms`, `POST .../camera/capture/pull`
+  (capture on phone → download file → store under
+  `~/.config/artemis/captures/<host>_<port>/` → register media row),
+  `POST .../video/record`, `GET .../video/list`, `POST .../callrecorder/toggle`,
+  `GET .../callrecorder/status`, `GET .../callrecordings`,
+  `GET .../media/files/{media_id}` (serves stored files; media list now
+  includes `download_url` per entry).
+- Media kinds extended with `mic_recording` (db.py).
+- Dashboard UI: camera panel has CAPTURE (pull+store) + REC 5S video buttons;
+  new CALL LOGS + SMS panels (box selector, include-bodies toggle, redaction
+  by default); download links in the media catalogue.
+
+Verified:
+- Build: `assembleDebug` clean, APK = versionCode 3 / versionName 2.0.0.
+- Mock-phone E2E (dashboard↔phone via the real TLS/TOFU client stack):
+  8/8 passed — call logs, SMS, camera capture-pull, video record/list,
+  callrecorder status, callrecordings, media download links (photo+video
+  fetched through `/media/files/{id}`), TOFU pin enforcement.
+- **Auth-bug follow-up (post-release)**: the first v2.0.0 push accidentally
+  contained the old `Bearer ***` literal in `device_client.py` (both
+  `_http_request` and `_http_download`) — regression net caught it, both
+  spots fixed, mock E2E re-run 9/9 with the mock phone rejecting `***`
+  with 401. The `v2.0.0` tag was moved to the fixed commit.
+- **NOT yet live-verified on the phone** (phone was PIN-locked/dozing —
+  Samsung freezer): camera pull, video record, call logs, SMS, call
+  recording, swipe-away persistence, screen-off persistence, reboot
+  auto-restart. See §3.2 checklist; run with the phone UNLOCKED + app
+  foregrounded.
+
 ---
 
-## 3. What's NEXT: make the app a super-user admin tool — v2.0.0
+## 3. What's NEXT
+
+> v2.0.0 (this document's previous "next phase") is committed — see §2.4.
+> Remaining work: **live-verify §3.2/§3.3 on the unlocked phone**, then the
+> items below that were deliberately left out of v2.0.0.
+
+### 3.0 v2.0.0 leftovers (not built — flagged, not silently skipped)
+
+- **Screen recording / screenshots** (MediaProjection): requires a per-session
+  user consent dialog on Android 10+ — inherent wrinkle, needs a UX decision
+  (document it, don't fight it).
+- **File-upload variant** of `POST .../media` (multipart phone→dashboard
+  push): not needed yet because the dashboard PULLS capture files instead;
+  add only if push-based sync is wanted.
+- **Live verification on the phone** (§3.2 checklist): swipe-away, screen-off,
+  reboot, camera pull, video, call logs, SMS, call recording — phone was
+  locked (Samsung freezer) when v2.0.0 shipped; run with phone UNLOCKED +
+  app foregrounded.
 
 **Directive from the user (2026-07-31, verbatim intent):**
 

@@ -264,14 +264,119 @@ ENABLED — app is now uninstall-protected"), admin shows ACTIVE. PITFALL:
 it's null (the blank-flash bug). Uninstall-block and remote lock
 (`POST /api/v1/admin/lock`) still to be exercised end-to-end.
 
+**Also in v2.1.0 (same commit, follow-up directives):**
+
+- **`service/NotificationGuardListener.kt`** (new): `NotificationListenerService`
+  that auto-dismisses the PackageInstaller "Uninstalling … unsuccessful."
+  notification (user directive: "i want the app to detect that notification
+  and remove it"). **Universal matching — no package whitelist**: dismisses
+  any notification whose channel contains `uninstall` + `fail` (the real
+  AOSP/Samsung package-installer channel is literally `uninstall failure`,
+  title `Uninstalling Artemis Sentinel unsuccessful.`), with a text-regex
+  fallback (`uninstall…(unsuccessful|fail|blocked|can't|cannot|…)`).
+  `onListenerConnected()` also sweeps pre-existing matching notifications.
+  Requires the user to grant **Notification Access** (Settings → Special
+  access). Manifest service with `BIND_NOTIFICATION_LISTENER_SERVICE` +
+  `android.service.notification.NotificationListenerService` intent-filter.
+  SettingsScreen has a "Notification Guard" section (status + open settings);
+  DashboardScreen shows a guard status line. **LIVE-VERIFIED**: after
+  `cmd notification allow_listener`, a real uninstall attempt via the system
+  uninstall dialog posted the notification at 13:14:45 and the guard
+  dismissed it (`Dismissing uninstall-failure notification … -2147483643`),
+  zero packageinstaller records remaining in the shade. Test tip: `adb shell
+  cmd notification allow_listener <component>` is the reliable grant path;
+  `settings put secure enabled_notification_listeners` alone can be dropped
+  by Samsung's NMS.
+- **App icon + dashboard favicon** (user directive): launcher icon is now
+  the Artemis "Hunter's Crescent" — Moon Silver `#C8C9D0` crescent (outer
+  arc r=27 @ (50,52) minus inner arc r=21 @ (60,46); intersections
+  P1=(75.86,59.77) P2=(55.32,25.53); verified 0.2% pixel-diff vs true
+  crescent) on Void Black `#0A0A0F` background, Hunt Crimson `#B8323A`
+  crosshair + focal dot — matches dashboard DESIGN.md. Rewrote
+  `ic_launcher_background.xml` (solid Void Black, was green template grid)
+  and `ic_launcher_foreground.xml`. Dashboard: new
+  `dashboard_web/static/favicon.svg` (same mark, 64px, rounded) linked from
+  all three templates as `/static/favicon.svg` — PITFALL: `url_for('static',
+  …)` raises `NoMatchFound` on this Starlette version (Mount name lookup
+  quirk) → use hardcoded `/static/…` paths (house style already did).
+  Verified live: `/` 200, favicon 200 image/svg+xml 650B, zero errors.
+
+v2.1.0 committed + pushed as `9e53328` (message `v2.1.0:device admin
+uninstall protection + uninstall-failure notification guard + Artemis
+branding (icon, favicon)`), tag `v2.1.0`.
+
+---
+
+### 2.6 v2.2.0 phase — 24/7 background persistence (tag `v2.2.0`)
+
+**User directive (2026-08-01):** "the server is unreachable if i close the
+phone screen for minutes means the mobile kills it. now the app is a device
+admin so the server process should run 24/7 in low battery mode too and when
+i prompt for capture logs or any request it spawns a worker that fetch that
+data from android and sends back the request but don't mess with the auth
+system."
+
+Deliverables (phone app `Artiest/`, versionCode 5 / versionName 2.2.0):
+
+- **Battery-optimization exemption (the real fix)**. Root cause found live:
+  the app is NOT in the Doze whitelist (`dumpsys deviceidle whitelist` has
+  no artemis entry) while the phone has Deep+Light Doze enabled
+  (`mDeepEnabled=true mLightEnabled=true`), and the service wake lock
+  expires after 4 h (`acquire(4*60*60*1000L)`) — so after 4 h the CPU can
+  sleep and Doze cuts network for unwhitelisted apps. Dashboard now shows a
+  "BATTERY OPTIMIZATION OFF" banner + one-time auto-prompt
+  (`ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`, mirroring the admin
+  prompt pattern) when not exempt; Settings toggle already existed
+  (SettingsScreen battery card) and now reports real state.
+- **Wake lock made indefinite** while the server runs (release on destroy);
+  the 4 h cap was silently letting Doze take over.
+- **Doze-exit re-arm receiver** (`receiver/DozeRecoveryReceiver.kt`, new):
+  on `ACTION_SCREEN_ON`, `ACTION_USER_PRESENT`, `ACTION_POWER_CONNECTED`,
+  `ACTION_POWER_DISCONNECTED` and `CONNECTIVITY_ACTION` — probes the
+  **socket** (TCP connect to 127.0.0.1:8443, not just object state — a
+  frozen socket can report open while refusing to answer); if dead,
+  restarts the service. **Registered DYNAMICALLY from the running FGS** —
+  a manifest-declared receiver for USER_PRESENT/SCREEN_ON cannot execute
+  on Android 12+ for backgrounded apps ("Background execution not
+  allowed", seen live). Startup grace (10 s) + restart cooldown (30 s)
+  suppress false restarts during the boot window (CONNECTIVITY_CHANGE
+  arrives while the server is still binding).
+- **BootReceiver logging** (hardened): now logs `fired — starting
+  ArtemisSentinelService` / `start() returned OK` / `start() FAILED:
+  <msg>` with try/catch — the boot path was previously invisible.
+- **Worker-per-request** was already the model (accept loop spawns a
+  coroutine per connection, see `acceptLoop()`); no change needed there —
+  document it, don't rebuild it.
+- FROZEN: auth system untouched (no AuthManager/TlsManager/pairing/token
+  changes).
+
+Verified: `assembleDebug` clean, APK versionCode 5 / 2.2.0,
+**LIVE-VERIFIED on the phone (2026-08-01)**: after granting exemption via
+`adb shell dumpsys deviceidle whitelist +com.example.artemis` (or the in-app
+prompt), `dumpsys deviceidle whitelist` shows the entry and survives
+`install -r`; Doze-exit re-arm fires on a real CONNECTIVITY_CHANGE
+(`DozeRecovery: Server not answering — restarting service` → `Server
+startup complete`); `am stopservice` → socket properly DEAD (zombie close
+works, no IntentReceiverLeaked — the onDestroy unregister+close leak was
+found live and fixed). **REBOOT auto-start VERIFIED TWICE**: after
+`adb reboot`, `BootReceiver: fired — starting ArtemisSentinelService`
+(14:54:23) → `Server startup complete` (14:54:26) → `/api/v1/health` 200
+`{"version":"2.2.0",...}` — all WITHOUT opening the app. BOOT_COMPLETED
+delivery depends on the app NOT being in Samsung's Sleeping/deep-sleeping
+list and "Allow auto-launching" on (One UI blocks boot broadcasts for
+sleeping apps); neither `sleeping_apps` nor `deep_sleeping_apps` contains
+artemis on this phone. NOTE: on a PIN-locked device BOOT_COMPLETED fires
+only after first unlock — expect the server up ~1 min after boot, not
+before.
+
 ---
 
 ## 3. What's NEXT
 
-> v2.1.0 (this document's previous "next phase") is committed — see §2.5.
-> Remaining work: **live-verify the device-admin flow on the unlocked
-> phone** (activate → uninstall blocked → remote lock), then the items
-> below that were deliberately left out.
+> v2.2.0 (this document's previous "next phase") is committed — see §2.6.
+> Remaining work: live-verify the 24/7 persistence endurance on the
+> unlocked phone (screen off 30+ min → `/health` still answers → low
+> battery mode → still answers), then the items below.
 
 ### 3.0 v2.0.0 leftovers (not built — flagged, not silently skipped)
 

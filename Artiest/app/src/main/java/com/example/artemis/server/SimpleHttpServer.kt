@@ -304,7 +304,7 @@ class SimpleHttpServer(
     private fun healthHandler(req: HttpRequest): HttpResponse {
         return jsonResponse(200, mapOf(
             "status" to "ok",
-            "version" to "2.1.0",
+            "version" to "2.2.0",
             "deviceName" to android.os.Build.MODEL,
             "uptimeSeconds" to ((System.currentTimeMillis() - startTime) / 1000),
             "activeConnections" to activeConnections,
@@ -1188,7 +1188,7 @@ class SimpleHttpServer(
             for ((key, value) in response.headers) {
                 headerLines.append("$key: $value\r\n")
             }
-            headerLines.append("Server: Artemis/2.1.0\r\n")
+            headerLines.append("Server: Artemis/2.2.0\r\n")
             headerLines.append("\r\n")
 
             output.write(headerLines.toString().toByteArray(Charsets.UTF_8))

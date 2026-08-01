@@ -141,6 +141,12 @@
             </intent-filter>
         </receiver>
 
+        <!-- NOTE: Doze-exit re-arm (SCREEN_ON / USER_PRESENT / power /
+             connectivity) is registered DYNAMICALLY by ArtemisSentinelService
+             while the server runs — a manifest receiver for those actions
+             cannot execute on Android 12+ for backgrounded apps ("Background
+             execution not allowed"). -->
+
     </application>
 
 </manifest>

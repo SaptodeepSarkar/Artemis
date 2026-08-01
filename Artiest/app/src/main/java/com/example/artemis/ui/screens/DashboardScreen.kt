@@ -22,6 +22,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AdminPanelSettings
+import androidx.compose.material.icons.filled.BatterySaver
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Pause
@@ -92,6 +93,7 @@ private val SERVER_PORT = 8443
 
 /** One-time device-admin prompt guard (per process). */
 private var adminPromptAttempted = false
+private var batteryPromptAttempted = false
 
 /**
  * Admin dashboard. The pairing flow is FROZEN (open → code → enter once);
@@ -123,6 +125,16 @@ fun DashboardScreen(
         ActivityResultContracts.StartActivityForResult()
     ) {
         adminActive = AdminReceiver.isActive(context)
+    }
+
+    // ---- battery optimization state (24/7 persistence) ----
+    var batteryOptimizationIgnored by remember {
+        mutableStateOf(isIgnoringBatteryOptimizations(context))
+    }
+    val batteryLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        batteryOptimizationIgnored = isIgnoringBatteryOptimizations(context)
     }
 
     // ---- actions ----
@@ -258,6 +270,21 @@ fun DashboardScreen(
                 android.util.Log.w("Dashboard", "Admin activation prompt failed: ${e.message}")
             }
         }
+        // One-time auto-prompt for battery-optimization exemption (24/7
+        // server persistence). Doze cuts network for unwhitelisted apps,
+        // which is what killed the :8443 server after the screen was off.
+        if (!batteryOptimizationIgnored && !batteryPromptAttempted) {
+            batteryPromptAttempted = true
+            try {
+                val intent = Intent(
+                    android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    android.net.Uri.parse("package:${context.packageName}")
+                )
+                context.startActivity(intent)
+            } catch (e: Exception) {
+                android.util.Log.w("Dashboard", "Battery optimization prompt failed: ${e.message}")
+            }
+        }
     }
 
     // ---- periodic status poll ----
@@ -265,6 +292,7 @@ fun DashboardScreen(
         while (true) {
             pairingCode = ArtemisApp.instance.currentPairingCode?.code
             certFingerprint = ArtemisApp.instance.currentCertFingerprint
+            batteryOptimizationIgnored = isIgnoringBatteryOptimizations(context)
             val server = ArtemisApp.instance.serverRef
             val running = server?.isRunning == true && !server.serverSocketClosed
             isServiceRunning = running
@@ -393,6 +421,14 @@ fun DashboardScreen(
                     AdminProtectionBanner(
                         active = adminActive,
                         onActivate = { adminLauncher.launch(AdminReceiver.activationIntent(context)) }
+                    )
+                }
+
+                // ---- battery optimization banner (24/7 persistence) ----
+                item(key = "battery-banner") {
+                    BatteryOptimizationBanner(
+                        ignored = batteryOptimizationIgnored,
+                        onFix = { batteryLauncher.launch(batteryOptimizationIntent(context)) }
                     )
                 }
 
@@ -771,6 +807,89 @@ private fun AdminProtectionBanner(
                     )
                 ) {
                     Text("ACTIVATE", style = MaterialTheme.typography.labelMedium)
+                }
+            }
+        }
+    }
+}
+
+/** True when the app is exempt from battery optimization (Doze whitelist). */
+private fun isIgnoringBatteryOptimizations(context: Context): Boolean {
+    return runCatching {
+        val pm = context.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+        pm.isIgnoringBatteryOptimizations(context.packageName)
+    }.getOrDefault(false)
+}
+
+/** Intent that opens the system "ignore battery optimizations" dialog. */
+private fun batteryOptimizationIntent(context: Context): Intent {
+    return Intent(
+        android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+        android.net.Uri.parse("package:${context.packageName}")
+    )
+}
+
+@Composable
+private fun BatteryOptimizationBanner(
+    ignored: Boolean,
+    onFix: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = if (ignored) Color(0xFF0E1A12) else Color(0xFF1C1510)
+        ),
+        border = BorderStroke(
+            1.dp,
+            if (ignored) Color(0xFF2E4A33) else Color(0xFF4A3A2E)
+        ),
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Default.BatterySaver,
+                contentDescription = null,
+                tint = if (ignored) AdminGreen else AdminAmber,
+                modifier = Modifier.size(20.dp)
+            )
+            Spacer(modifier = Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = if (ignored) "24/7 PERSISTENCE ON" else "BATTERY OPTIMIZATION OFF",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = if (ignored) AdminGreen else AdminAmber,
+                    letterSpacing = TextUnit(1f, TextUnitType.Sp)
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = if (ignored) {
+                        "Exempt from Doze — the server keeps serving with the screen off."
+                    } else {
+                        "Android Doze kills the server when the screen is off. Grant exemption."
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = AdminMuted
+                )
+            }
+            if (!ignored) {
+                Spacer(modifier = Modifier.width(10.dp))
+                Button(
+                    onClick = onFix,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = AdminAmber,
+                        contentColor = Color(0xFF1A1206)
+                    ),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                        horizontal = 14.dp, vertical = 8.dp
+                    )
+                ) {
+                    Text("ALLOW", style = MaterialTheme.typography.labelMedium)
                 }
             }
         }

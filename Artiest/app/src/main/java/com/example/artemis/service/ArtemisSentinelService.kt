@@ -15,6 +15,7 @@ import androidx.work.WorkManager
 import com.example.artemis.ArtemisApp
 import com.example.artemis.auth.AuthManager
 import com.example.artemis.data.AppDatabase
+import com.example.artemis.receiver.DozeRecoveryReceiver
 import com.example.artemis.feature.CallLogsProvider
 import com.example.artemis.feature.CallRecorder
 import com.example.artemis.feature.CameraController
@@ -49,6 +50,13 @@ class ArtemisSentinelService : Service() {
 
     private var wakeLock: PowerManager.WakeLock? = null
     private var isRunning = false
+
+    // Doze-exit re-arm: registered DYNAMICALLY while the service runs.
+    // A manifest-declared receiver for USER_PRESENT / SCREEN_ON cannot run
+    // on Android 12+ when the app is in the background ("Background
+    // execution not allowed" — seen live). The FGS keeps this process
+    // alive, so a dynamic registration receives those broadcasts.
+    private var dozeRecoveryReceiver: DozeRecoveryReceiver? = null
 
     companion object {
         const val NOTIFICATION_ID = 1001
@@ -114,6 +122,7 @@ class ArtemisSentinelService : Service() {
 
         startForeground(NOTIFICATION_ID, createNotification(0))
         acquireWakeLock()
+        registerDozeRecovery()
 
         artemisServer = SimpleHttpServer(
             app = app,
@@ -153,6 +162,7 @@ class ArtemisSentinelService : Service() {
 
     private fun stopServer() {
         isRunning = false
+        unregisterDozeRecovery()
         serviceScope.launch {
             try {
                 artemisServer.stop()
@@ -200,7 +210,7 @@ class ArtemisSentinelService : Service() {
             "$deviceName — up $uptime"
         }
         return NotificationCompat.Builder(this, ArtemisApp.CHANNEL_SERVICE)
-            .setContentTitle("Artemis Sentinel v2.1.0 Active")
+            .setContentTitle("Artemis Sentinel v2.2.0 Active")
             .setContentText(contentText)
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .setPriority(NotificationCompat.PRIORITY_LOW)
@@ -221,7 +231,9 @@ class ArtemisSentinelService : Service() {
                 PowerManager.PARTIAL_WAKE_LOCK,
                 "ArtemisSentinel:ServerWakeLock"
             )
-            wakeLock?.acquire(4 * 60 * 60 * 1000L)
+            // Indefinite while the service runs (24/7 persistence). The old
+            // 4 h cap let the CPU sleep and Doze kill the server socket.
+            wakeLock?.acquire()
         } catch (_: Exception) { }
     }
 
@@ -232,6 +244,39 @@ class ArtemisSentinelService : Service() {
             }
         } catch (_: Exception) { }
         wakeLock = null
+    }
+
+    /** Dynamically register the Doze-exit re-arm receiver (see field note). */
+    private fun registerDozeRecovery() {
+        try {
+            if (dozeRecoveryReceiver != null) return
+            val receiver = DozeRecoveryReceiver()
+            dozeRecoveryReceiver = receiver
+            val filter = android.content.IntentFilter().apply {
+                addAction(Intent.ACTION_SCREEN_ON)
+                addAction(Intent.ACTION_USER_PRESENT)
+                addAction(Intent.ACTION_POWER_CONNECTED)
+                addAction(Intent.ACTION_POWER_DISCONNECTED)
+                addAction(android.net.ConnectivityManager.CONNECTIVITY_ACTION)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
+            } else {
+                @Suppress("DEPRECATION")
+                registerReceiver(receiver, filter)
+            }
+            receiver.onRegistered()
+            android.util.Log.i("ArtemisSvc", "DozeRecovery receiver registered")
+        } catch (e: Exception) {
+            android.util.Log.w("ArtemisSvc", "DozeRecovery register failed: ${e.message}")
+        }
+    }
+
+    private fun unregisterDozeRecovery() {
+        try {
+            dozeRecoveryReceiver?.let { unregisterReceiver(it) }
+        } catch (_: Exception) { }
+        dozeRecoveryReceiver = null
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -262,6 +307,16 @@ class ArtemisSentinelService : Service() {
     override fun onDestroy() {
         isRunning = false
         app.serverRef = null
+        unregisterDozeRecovery()
+        // IMPORTANT: close the socket properly. Without this, the bound
+        // ServerSocket leaks — TCP still shows LISTEN but the accept loop
+        // is cancelled and the wake lock is released, i.e. a zombie socket
+        // that never answers (and Doze freezes it). START_STICKY then
+        // re-creates the service on the next opportunity; a stale socket
+        // would make the restart fail with "address already in use".
+        try {
+            kotlinx.coroutines.runBlocking { artemisServer.stop() }
+        } catch (_: Exception) { }
         serviceScope.cancel()
         releaseWakeLock()
         super.onDestroy()

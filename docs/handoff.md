@@ -1,82 +1,142 @@
-# Artemis Sentinel — Handoff: Dashboard UX polish (v2.3.2)
+# Artemis Sentinel — Handoff: Remote-admin control (screen control + 3-way RECORD + PiP PLAY)
 
-> Written 2026-08-01, after v2.3.2 shipped (dashboard UX per user
-> feedback; live-verified in-browser). Read `docs/AGENTS.md` first
-> (project reference + frozen-sector rules), then `docs/SECURITY.md`
-> (threat model), then this document, then the source.
+> Written 2026-08-01, after v2.3.2 shipped (dashboard UX polish) and
+> updated with the NEXT phase brief per user request. Read
+> `docs/AGENTS.md` first (project reference + frozen-sector rules), then
+> `docs/SECURITY.md` (threat model), then this document, then the source.
 
 ---
 
-## 1. DONE — what shipped in v2.3.2 (all verified in the browser)
+## 1. DONE — v2.3.2 (dashboard UX, verified in-browser)
 
-User feedback that drove this phase: "call-log delete is solved but SMS
-delete is not"; "when I open the dashboard it should fetch the location
-and show it"; "the SCREEN button flips to rear cam — make that button
-gone and make FLIP work"; "the camera feed has a weird FRONT text —
-remove it". Deliverable: dashboard-only changes (NO phone rebuild —
-the phone stays on v2.3.1, versionCode 7).
+- LIVE VIEW is camera-only (`liveSource` fixed `"cam"`); SCREEN toggle,
+  status badge and front-cam PiP removed; FLIP always works.
+- Location auto-fetches on dashboard open and on REFRESH.
+- SMS delete button removed (Android-blocked; READ-ONLY note shown);
+  call-log delete retained.
+- Phone unchanged (v2.3.1 / versionCode 7). Committed `406585c`, tag
+  `v2.3.2`.
 
-### 1.1 SMS delete removed (Android-blocked by design)
+## 2. NEXT phase — REMOTE-ADMIN CONTROL (build steps)
 
-- The per-message delete button and `deleteSms()` are REMOVED from the
-  web dashboard. SMS-row deletion is silently no-op'd by Android for
-  non-default SMS apps, and Artemis is deliberately NEVER the default
-  SMS app (user mandate — the stock Samsung app keeps receiving SMS),
-  so a delete button that always fails was dead UI.
-- The SMS panel now shows a small READ-ONLY note stating the caveat.
-- Call-log delete is UNCHANGED and still works (`WRITE_CALL_LOG`,
-  pm-grantable on Samsung) — delete buttons remain on call-log rows.
-- Phone-side `DELETE ACCESS` info card (DashboardScreen.kt) unchanged —
-  it already documents the same caveat. The `/api/v1/sms/delete`
-  endpoint still exists (returns the honest error) for scripted use.
+User request: remote-administrator control of the phone — control the
+screen, a RECORD button that starts recording the screen AND both the
+front and rear cameras when the live preview is started (and stops it),
+recordings stored under a `data` folder with a `record` folder containing
+three media folders, and a PLAY button for direct PiP playback.
 
-### 1.2 Location auto-fetch on dashboard open
+### 2.1 Screen control (tap / swipe / system buttons)
 
-- `getLocation()` now runs automatically when the device dashboard
-  loads (top-level call in `dashboard.js`), and REFRESH
-  (`refreshDevice()`) also refreshes location. The LOCATION card shows
-  LAT/LON, ±accuracy, Google-Maps embed and fix time without any click.
-  ACQUIRE FIX / OPEN IN MAPS buttons unchanged.
-- VERIFIED: opening the page auto-populated LAT 25.4507 / LON 81.7493
-  with the map iframe + FIX_ACQUIRED timestamp.
+Already exists phone-side, NOT yet wired to the network:
+`RemoteControlService` (accessibility) has `dispatchGesture` (tap path
+at `RemoteControlService.kt:166-169`, `GestureDescription.Builder` +
+`StrokeDescription`) and `performGlobalAction` (HOME, BACK, RECENTS,
+NOTIFICATIONS, QUICK_SETTINGS, POWER_DIALOG, LOCK_SCREEN — lines
+99-152). The M51's one-time accessibility enable already persists, so
+this is ZERO new consent.
 
-### 1.3 LIVE VIEW is camera-only; FLIP works; status badge gone
+Steps:
+1. Add a `RemoteInputController` helper (house style: plain Kotlin
+   class taking `Context`, no HTTP knowledge) exposing
+   `tap(x, y)`, `swipe(x1,y1,x2,y2,ms)`, `longPress(x,y)`,
+   `global(action)` — all delegating to `RemoteControlService.instance`
+   (null → `{"error":"accessibility_disabled"}`).
+2. Wire into `SimpleHttpServer.kt` (frozen sector untouched — ADD
+   routes): `POST /api/v1/control/tap` `{"x":..,"y":..}`,
+   `POST /api/v1/control/swipe`, `POST /api/v1/control/action`
+   `{"action":"home|back|recents|lock|notifications|quick_settings|power"}`,
+   all `requireAuth`-wrapped. Swipes need a
+   `GestureDescription.StrokeDescription(path, 0, durationMs)` with a
+   multi-point `Path` (dispatchGesture supports it — mirror the tap
+   helper).
+3. Dashboard: small control pad in the LIVE VIEW panel — tap = click on
+   the canvas (map canvas coords to device px: canvas shows the scaled
+   1080×2400 feed, so `x_dev = x_canvas * (feed_w / canvas_w)`), swipe =
+   drag on the canvas, plus HOME / BACK / RECENTS / LOCK buttons.
+   Send over the EXISTING WS (`sendWs({cmd:"input",...})` — add an
+   `"input"` command to the phone's `wsLiveSessionHandler` reader;
+   single-pixel feed taps are fine, no new stream needed).
 
-- The SCREEN ⇄ CAM toggle button is REMOVED. LIVE VIEW always streams
-  the camera (`liveSource` fixed to `"cam"` in `dashboard.js`); the
-  phone's screen feed (ch 1) and screen mode remain available via the
-  raw API (`/api/v1/ws/live` with `{"cmd":"source","v":"screen"}`) for
-  scripted use — just no dashboard button.
-- `toggleFlip()` has no more `liveSource !== "cam"` guard — FLIP always
-  toggles back ⇄ front; the label syncs. VERIFIED: back → FRONT → BACK
-  with the canvas rendering at every step, connection held.
-- The status badge (`LIVE · CAM · FRONT` overlay, element `liveStatus`)
-  is REMOVED — no more weird FRONT text on the feed.
-- The front-camera PiP (button + wrap canvas) is REMOVED: with cam-only
-  streaming the phone does not emit the ch-3 PiP stream, so the PiP box
-  would have been a dead black square; the front camera is reachable
-  via FLIP instead.
-- Audio is unchanged (AUDIO toggle + WebAudio, auto-ON at stream start).
-- VERIFIED in-browser: START → back cam 1088×1088 canvas lit (WS open)
-  → FLIP → front cam lit, label "FLIP: FRONT" → FLIP back → STOP clean.
+### 2.2 RECORD — screen + front cam + rear cam, one button
 
-## 2. NEXT phase — candidates (pick what fits)
+Trigger: RECORD button appears when LIVE VIEW is streaming; tap starts
+all three recorders, tap again (STOP) stops and saves.
 
-1. **Screen feed in the dashboard again**: if the user later wants the
-   screen view back in the UI, re-add a feed-mode toggle that sends
-   `{"cmd":"source","v":"screen"}` (the phone side never lost it) and
-   restore the ch-1 draw branch + PiP.
-2. **Battery/status auto-refresh**: the status strip only fills on
-   REFRESH click; a lightweight poll (e.g. every 30s for battery +
-   uptime) would keep the header live without user interaction.
-3. **Front-cam fps in the main feed**: the flip path uses the same
-   640×480 preview; bumping the `ImageAnalysis` target resolution
-   (when the M51 allows) raises sharpness at an fps cost.
-4. **Backpressure / token rotation on long-lived WS**: an open WS
-   session survives access-token rotation (documented in SECURITY.md
-   §2.8 today, not enforced — decide if the threat model cares).
-5. Anything from the original helper backlog not yet wired into the
-   dashboard UI (files browser panel, contacts panel).
+Storage (user's exact layout, under the app data dir — `filesDir` is
+already whitelisted in `FileSystemHelper` roots so `/files/list` can
+browse it):
+```
+<app-data>/data/record/screen/rec_<epochMs>.mp4
+<app-data>/data/record/front/rec_<epochMs>.mp4
+<app-data>/data/record/rear/rec_<epochMs>.mp4
+```
+
+Steps:
+1. New `TripleRecorder` helper (`feature/`, FGS-only, no Activity):
+   three `MediaCodec` H.264 encoders + one `MediaMuxer` each,
+   feeding from:
+   - **screen**: the accessibility `takeScreenshot` loop ALREADY used
+     by `RemoteControlService.capture()` — capture→encode→mux at the
+     preview cadence (~2-3 fps at 1080×2400; raise fps by capping
+     width ~960 for recording). MediaProjection
+     (`ScreenCaptureService`) stays the documented fallback.
+   - **front + rear**: CameraX supports simultaneous two-camera binding
+     on API 30+ (M51 is API 31): bind BOTH `ImageAnalysis` use cases
+     (640×480, the persistent-binding pattern from
+     `CameraController.startPreviewStream`) → YUV→encoder→mux. If the
+     device rejects concurrent cameras, fall back to recording the
+     currently-flipped lens and mark the other folder empty.
+   - Stop: `stop()` on all three, close encoders/muxers, emit
+     `{"status":"saved","paths":[...]}`.
+2. IMPORTANT — live-preview exclusivity: the WS cam preview holds the
+   cameras. Recording must REUSE the same `ImageAnalysis` frames
+   (add a frame-copy hook in `CameraController` that the recorder
+   subscribes to) rather than rebinding — rebinding would kill the
+   live stream. Same for screen: reuse the capture loop, don't fight
+   the WS writer.
+3. Endpoints (ADD, frozen sector untouched): `POST /api/v1/record/start`
+   (returns immediately, recorders run on worker coroutines),
+   `POST /api/v1/record/stop`, `GET /api/v1/record/status`,
+   `GET /api/v1/record/list` → `{"screen":[...],"front":[...],"rear":[...]}`
+   (filenames + sizes + timestamps from the three folders),
+   `GET /api/v1/record/{media}/{id}/file` (binary, mirror
+   `videoFileHandler`). WS alternative: `{"cmd":"record","v":"on|off"}`
+   in `wsLiveSessionHandler` so the dashboard RECORD button rides the
+   existing socket.
+4. Dashboard: RECORD button (red dot, `toggleRecord()`), STOP swaps
+   label; wire to the WS command (or HTTP POST). Reuse the binary
+   frame-parsing already in `dashboard.js` — no new rendering path.
+
+### 2.3 PLAY — direct PiP playback
+
+Steps:
+1. Dashboard RECORDINGS row (in the LIVE VIEW panel or CAPTURED MEDIA):
+   one entry per file from `/record/list`, grouped by the three media
+   folders.
+2. PLAY button per entry → PiP player: reuse the OLD PiP box slot
+   (top-right overlay, `livePipWrap` position) with a `<video>` element
+   streaming `GET /api/device/{host}/{port}/record/{media}/{id}/file`
+   via the existing authenticated proxy (browser `<video>` plays MP4;
+   the phone route is the same binary response as `video/{id}/file`).
+   Close button + `pip`-style draggable, or fixed top-right like before.
+3. Android-side PiP (PictureInPictureMode) is an alternative if a
+   phone-local player is wanted later — dashboard-side PiP is the
+   direct path and matches the previous UX.
+
+### 2.4 Acceptance checklist
+
+- FGS-only: RECORD starts/stops with the app swiped away (the FGS and
+  accessibility service keep running — no Activity).
+- All three MP4s appear under
+  `<app-data>/data/record/{screen,front,rear}/` and play back (VLC/ffprobe
+  on the desktop after pull, or the PiP player).
+- WS survives RECORD start/stop mid-stream (no reconnect, no drop —
+  same rule as the 64 KiB framing fix: don't break the live frames
+  while muxing).
+- Screen control: tap lands on the right app, HOME/BACK/LOCK work from
+  the dashboard with the app never opened.
+- `docs/AGENTS.md` gets a §2.9 + endpoint-table rows; `handoff.md`
+  rewritten; commit `v2.3.3:...`, tag `v2.3.3`, push.
 
 ## 3. Hard rules (unchanged)
 
@@ -92,12 +152,14 @@ the phone stays on v2.3.1, versionCode 7).
   requirement — stock Samsung apps keep those roles).
 - WebSocket server frames with payloads > 64 KiB MUST use the 127
   (64-bit) extended length — see AGENTS.md §2.7 for why.
-- Dashboard JS is aggressively browser-cached: verify edits with a
-  cache-busted URL (`?x=N`); the dashboard serves static files from
-  disk, so JS/HTML edits need NO server restart.
+- CameraX `bindToLifecycle` requires the main thread + STARTED lifecycle
+  (`LifecycleService`); preview bindings are persistent — photo/frame
+  captures stop the preview first (camera exclusivity).
+- Dashboard JS is aggressively browser-cached: verify edits with
+  cache-busted URLs (`?x=N`); static-file edits need no server restart.
 
 ## 4. Delivery record
 
-- Commit + push `master`, message `v2.3.2:...`, tag `v2.3.2`, clean tree.
-- `docs/AGENTS.md` §2.2/§2.8 updated; `docs/SECURITY.md` unchanged
-  this phase (no security-relevant change).
+- v2.3.2 shipped: commit `406585c`, tag `v2.3.2`, pushed, clean tree.
+- This handoff (remote-admin control brief) committed immediately after
+  writing, per user instruction.

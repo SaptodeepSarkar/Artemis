@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 108 108">
+  <!-- Artemis Labs favicon: The Hunter's Crescent (DESIGN.md §2.1) -->
+  <rect width="108" height="108" rx="18" fill="#0A0A0F"/>
+  <!-- Crescent: outer arc (r=27 @ 50,52) minus inner arc (r=21 @ 60,46) -->
+  <path d="M55.32,25.53 A27,27 0 1,0 75.86,59.77 A21,21 0 1,1 55.32,25.53 Z" fill="#C8C9D0"/>
+  <!-- Crosshair ticks (Ghost Line style) -->
+  <path d="M66,32 L66,40 M66,48 L66,56 M58,40 L66,40 M66,40 L74,40" fill="none" stroke="#B8323A" stroke-width="2" stroke-linecap="round"/>
+  <!-- Focal dot -->
+  <circle cx="66" cy="40" r="4" fill="#B8323A"/>
+</svg>

@@ -1,9 +1,9 @@
 # Artemis Sentinel — Agent Handoff
 
-> Written 2026-07-31 (v2.0.0 phase: background persistence, feature fixes,
-> admin-grade UI). Read this FIRST, then `docs/SECURITY.md` (full threat
-> model), then the per-module READMEs. It tells you how to regain context in
-> ~10 minutes, what is done, and what the next phase looks like.
+> Written 2026-08-01 (v2.1.0 phase: device-admin / uninstall protection).
+> Read this FIRST, then `docs/SECURITY.md` (full threat model), then the
+> per-module READMEs. It tells you how to regain context in ~10 minutes,
+> what is done, and what the next phase looks like.
 
 ---
 
@@ -216,13 +216,62 @@ Verified:
   auto-restart. See §3.2 checklist; run with the phone UNLOCKED + app
   foregrounded.
 
+### 2.5 v2.1.0 phase — device admin / uninstall protection (tag `v2.1.0`)
+
+**User directive (2026-08-01):** "I want the app to be uninstallable — admin
+access, the app asks for admin privileges." Deliverable: the app requests
+**device-administrator** privileges; while active, Android refuses to
+uninstall it ("You can't uninstall this app while device admin is active").
+
+Phone app (`Artiest/`, versionCode 4 / versionName 2.1.0):
+- **`receiver/AdminReceiver.kt`** (new): `DeviceAdminReceiver` with a
+  single declared policy (`force-lock`). `isActive()` / `activationIntent()`
+  / `deactivate()` / `lockNow()` helpers. `onDisableRequested` returns a
+  warning string shown by the system when someone tries to remove admin.
+- **`res/xml/device_admin_policies.xml`** (new): `<uses-policies>
+  <force-lock />`.
+- **Manifest**: `.receiver.AdminReceiver` registered with
+  `android.permission.BIND_DEVICE_ADMIN`, meta-data
+  `android.app.device_admin` → `@xml/device_admin_policies`,
+  intent-filter `DEVICE_ADMIN_ENABLED`. Strings `admin_label` /
+  `admin_description` added.
+- **DashboardScreen**: amber/green "UNINSTALL PROTECTED / DEVICE ADMIN OFF"
+  banner below the pairing card (ACTIVATE button when off); **one-time
+  auto-prompt** (per process) fires `ACTION_ADD_DEVICE_ADMIN` ~3 s after
+  the dashboard opens when admin is inactive. State refreshes when the
+  system admin screen returns.
+- **SettingsScreen**: new "Device Admin" section — status (active/off),
+  Activate (system screen), Lock Screen, Deactivate (in-place,
+  `removeActiveAdmin`).
+- **New authenticated endpoint** `POST /api/v1/admin/lock` (SimpleHttpServer):
+  locks the screen via `DevicePolicyManager.lockNow()`; returns
+  `{"status":"locked"}` or `{"status":"not_active", ...}` (200) when admin
+  isn't active — dashboard can surface the activation instructions.
+
+FROZEN sector untouched: no changes to AuthManager, TlsManager, pairing UX,
+code rotation, token lifecycle, or existing auth logic — only NEW additions
+(banner, section, endpoint). Dashboard web UI unchanged (lock button is a
+possible next-phase item).
+
+Verified: `assembleDebug` clean (exit 0), APK = versionCode 4 / versionName
+2.1.0, merged manifest contains AdminReceiver + BIND_DEVICE_ADMIN, policy
+XML packaged in the APK. **LIVE-VERIFIED on the phone (2026-08-01)**:
+activation screen displays (no NEW_TASK flag — DeviceAdminAdd refuses
+"new task" starts and flashes blank), `onEnabled` fires ("Device admin
+ENABLED — app is now uninstall-protected"), admin shows ACTIVE. PITFALL:
+`activationIntent()` must NEVER set `FLAG_ACTIVITY_NEW_TASK` — AOSP
+`DeviceAdminAdd` calls `getCallingActivity()` and finishes instantly when
+it's null (the blank-flash bug). Uninstall-block and remote lock
+(`POST /api/v1/admin/lock`) still to be exercised end-to-end.
+
 ---
 
 ## 3. What's NEXT
 
-> v2.0.0 (this document's previous "next phase") is committed — see §2.4.
-> Remaining work: **live-verify §3.2/§3.3 on the unlocked phone**, then the
-> items below that were deliberately left out of v2.0.0.
+> v2.1.0 (this document's previous "next phase") is committed — see §2.5.
+> Remaining work: **live-verify the device-admin flow on the unlocked
+> phone** (activate → uninstall blocked → remote lock), then the items
+> below that were deliberately left out.
 
 ### 3.0 v2.0.0 leftovers (not built — flagged, not silently skipped)
 
@@ -393,8 +442,10 @@ download link per entry on the dashboard.
 
 - Git: work tree must stay clean; commit + push when a phase completes.
   v1.4.1 = tag `v1.4.1` = versionName "1.4.1" = versionCode 2 = SECURITY.md
-  header — keep them aligned for releases. **Next release: 2.0.0**
-  (versionCode 3, tag `v2.0.0`) — the app-persistence/features/UI phase.
+  header — keep them aligned for releases. **Current release: 2.1.0**
+  (versionCode 4, tag `v2.1.0`) — the device-admin / uninstall-protection
+  phase (§2.5). SECURITY.md header still reads 2.0.0 — bump it on the next
+  phase that touches security docs.
 - `.gitignore` covers `__pycache__/`, `*.pyc`.
 - No credentials appear anywhere in the repo or in this doc — pairing codes,
   tokens, pins and passwords are runtime state in `~/.config/artemis/` only.

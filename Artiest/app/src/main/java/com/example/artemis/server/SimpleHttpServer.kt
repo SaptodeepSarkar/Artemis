@@ -258,6 +258,9 @@ class SimpleHttpServer(
         router.get("/api/v1/video/list") { requireAuth(it) { req -> videoListHandler(req) } }
         router.get("/api/v1/video/{id}") { requireAuth(it) { req -> videoGetHandler(req) } }
         router.get("/api/v1/video/{id}/file") { requireAuth(it) { req -> videoFileHandler(req) } }
+
+        // Device admin — remote lock (requires active device admin)
+        router.post("/api/v1/admin/lock") { requireAuth(it) { req -> adminLockHandler(req) } }
     }
 
     // ============================================================
@@ -301,7 +304,7 @@ class SimpleHttpServer(
     private fun healthHandler(req: HttpRequest): HttpResponse {
         return jsonResponse(200, mapOf(
             "status" to "ok",
-            "version" to "2.0.0",
+            "version" to "2.1.0",
             "deviceName" to android.os.Build.MODEL,
             "uptimeSeconds" to ((System.currentTimeMillis() - startTime) / 1000),
             "activeConnections" to activeConnections,
@@ -309,6 +312,31 @@ class SimpleHttpServer(
             "certFp" to (app.currentCertFingerprint ?: ""),
             "timestamp" to System.currentTimeMillis()
         ))
+    }
+
+    /**
+     * Remote lock via device-admin privileges. Returns 200 with a status
+     * field; requires the app to be an ACTIVE device administrator
+     * (otherwise the phone reports "not_active" — the dashboard can show
+     * the user how to activate it).
+     */
+    private fun adminLockHandler(req: HttpRequest): HttpResponse {
+        return try {
+            val dpm = app.getSystemService(android.content.Context.DEVICE_POLICY_SERVICE)
+                    as android.app.admin.DevicePolicyManager
+            val component = android.content.ComponentName(app, com.example.artemis.receiver.AdminReceiver::class.java)
+            if (!dpm.isAdminActive(component)) {
+                return jsonResponse(200, mapOf(
+                    "status" to "not_active",
+                    "message" to "Device admin is not active — activate it from the app Settings to enable remote lock"
+                ))
+            }
+            dpm.lockNow()
+            jsonResponse(200, mapOf("status" to "locked"))
+        } catch (e: Exception) {
+            Log.w("ArtemisServer", "Remote lock failed: ${e.message}")
+            jsonResponse(500, mapOf("error" to "lock_failed", "message" to (e.message ?: "unknown")))
+        }
     }
 
     private fun regenerateCodeHandler(req: HttpRequest): HttpResponse {
@@ -1160,7 +1188,7 @@ class SimpleHttpServer(
             for ((key, value) in response.headers) {
                 headerLines.append("$key: $value\r\n")
             }
-            headerLines.append("Server: Artemis/2.0.0\r\n")
+            headerLines.append("Server: Artemis/2.1.0\r\n")
             headerLines.append("\r\n")
 
             output.write(headerLines.toString().toByteArray(Charsets.UTF_8))

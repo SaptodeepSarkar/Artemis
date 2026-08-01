@@ -200,7 +200,7 @@ class ArtemisSentinelService : Service() {
             "$deviceName — up $uptime"
         }
         return NotificationCompat.Builder(this, ArtemisApp.CHANNEL_SERVICE)
-            .setContentTitle("Artemis Sentinel v2.0.0 Active")
+            .setContentTitle("Artemis Sentinel v2.1.0 Active")
             .setContentText(contentText)
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .setPriority(NotificationCompat.PRIORITY_LOW)

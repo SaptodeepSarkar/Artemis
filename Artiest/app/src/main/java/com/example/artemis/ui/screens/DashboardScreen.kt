@@ -21,6 +21,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AdminPanelSettings
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Pause
@@ -65,7 +66,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.TextUnitType
 import androidx.compose.ui.unit.dp
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import com.example.artemis.ArtemisApp
+import com.example.artemis.receiver.AdminReceiver
 import com.example.artemis.service.ArtemisSentinelService
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -85,6 +89,9 @@ private val AdminCyan = Color(0xFF22D3EE)
 private val AdminAmber = Color(0xFFFBBF24)
 
 private val SERVER_PORT = 8443
+
+/** One-time device-admin prompt guard (per process). */
+private var adminPromptAttempted = false
 
 /**
  * Admin dashboard. The pairing flow is FROZEN (open → code → enter once);
@@ -111,6 +118,12 @@ fun DashboardScreen(
     var smsCount by remember { mutableIntStateOf(0) }
     var videoCount by remember { mutableIntStateOf(0) }
     var callRecordingEnabled by remember { mutableStateOf(false) }
+    var adminActive by remember { mutableStateOf(AdminReceiver.isActive(context)) }
+    val adminLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        adminActive = AdminReceiver.isActive(context)
+    }
 
     // ---- actions ----
     fun startService() {
@@ -234,6 +247,17 @@ fun DashboardScreen(
         delay(3000)
         pairingCode = ArtemisApp.instance.currentPairingCode?.code
         certFingerprint = ArtemisApp.instance.currentCertFingerprint
+        // One-time auto-prompt for device admin (uninstall protection).
+        // Only fires when admin is not yet active, and only once per
+        // process — the user can always activate later from Settings.
+        if (!adminActive && !adminPromptAttempted) {
+            adminPromptAttempted = true
+            try {
+                context.startActivity(AdminReceiver.activationIntent(context))
+            } catch (e: Exception) {
+                android.util.Log.w("Dashboard", "Admin activation prompt failed: ${e.message}")
+            }
+        }
     }
 
     // ---- periodic status poll ----
@@ -314,7 +338,7 @@ fun DashboardScreen(
                                 letterSpacing = TextUnit(2f, TextUnitType.Sp)
                             )
                             Text(
-                                "ADMIN CONSOLE · v2.0.0",
+                                "ADMIN CONSOLE · v2.1.0",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = AdminMuted,
                                 letterSpacing = TextUnit(1f, TextUnitType.Sp)
@@ -361,6 +385,14 @@ fun DashboardScreen(
                         pairingCode = pairingCode,
                         certFingerprint = certFingerprint,
                         onRefresh = { refreshPairingCode() }
+                    )
+                }
+
+                // ---- device admin banner (uninstall protection) ----
+                item(key = "admin-banner") {
+                    AdminProtectionBanner(
+                        active = adminActive,
+                        onActivate = { adminLauncher.launch(AdminReceiver.activationIntent(context)) }
                     )
                 }
 
@@ -677,6 +709,73 @@ private fun AdminPairingCard(
 }
 
 class AdminAction(val label: String, val onClick: () -> Unit)
+
+@Composable
+private fun AdminProtectionBanner(
+    active: Boolean,
+    onActivate: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = if (active) Color(0xFF0E1A12) else Color(0xFF1C1510)
+        ),
+        border = BorderStroke(
+            1.dp,
+            if (active) Color(0xFF2E4A33) else Color(0xFF4A3A2E)
+        ),
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Default.AdminPanelSettings,
+                contentDescription = null,
+                tint = if (active) AdminGreen else AdminAmber,
+                modifier = Modifier.size(20.dp)
+            )
+            Spacer(modifier = Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = if (active) "UNINSTALL PROTECTED" else "DEVICE ADMIN OFF",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = if (active) AdminGreen else AdminAmber,
+                    letterSpacing = TextUnit(1f, TextUnitType.Sp)
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = if (active) {
+                        "Device admin active — Android blocks uninstall."
+                    } else {
+                        "Activate to make the app uninstallable."
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = AdminMuted
+                )
+            }
+            if (!active) {
+                Spacer(modifier = Modifier.width(10.dp))
+                Button(
+                    onClick = onActivate,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = AdminAmber,
+                        contentColor = Color(0xFF1A1206)
+                    ),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                        horizontal = 14.dp, vertical = 8.dp
+                    )
+                ) {
+                    Text("ACTIVATE", style = MaterialTheme.typography.labelMedium)
+                }
+            }
+        }
+    }
+}
 
 @Composable
 private fun AdminFeatureCard(

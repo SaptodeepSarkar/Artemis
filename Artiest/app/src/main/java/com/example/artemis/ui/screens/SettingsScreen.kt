@@ -1,6 +1,7 @@
 package com.example.artemis.ui.screens
 
 import android.content.Context
+import android.content.Intent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -15,9 +16,11 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.AdminPanelSettings
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.NotificationsOff
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Security
@@ -47,9 +50,14 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import com.example.artemis.receiver.AdminReceiver
+import com.example.artemis.service.NotificationGuardListener
 import kotlinx.coroutines.launch
 
 /** A paired dashboard as reported by the phone's local server. */
@@ -84,6 +92,26 @@ fun SettingsScreen(
             pm.isIgnoringBatteryOptimizations(context.packageName)
         }.getOrDefault(false)
     ) }
+
+    // ---- device admin state ----
+    var adminActive by remember { mutableStateOf(AdminReceiver.isActive(context)) }
+    // Refresh state when returning from the system device-admin screen.
+    val adminLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        adminActive = AdminReceiver.isActive(context)
+    }
+
+    // ---- notification guard state ----
+    var guardGranted by remember {
+        mutableStateOf(NotificationGuardListener.isAccessGranted(context))
+    }
+    // Refresh state when returning from Notification Access settings.
+    val guardLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        guardGranted = NotificationGuardListener.isAccessGranted(context)
+    }
 
     // ---- paired dashboards state (session management) ----
     val scope = rememberCoroutineScope()
@@ -306,6 +334,149 @@ fun SettingsScreen(
                 }
             }
 
+            // ---- device admin section (uninstall protection) ----
+            item(key = "admin_section") {
+                SectionHeader(title = "Device Admin", icon = Icons.Default.AdminPanelSettings)
+            }
+
+            item(key = "admin_card") {
+                SettingsCard {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.Top
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.AdminPanelSettings,
+                            contentDescription = null,
+                            tint = if (adminActive) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.error
+                            },
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = if (adminActive) {
+                                    "Uninstall protection ACTIVE"
+                                } else {
+                                    "Uninstall protection OFF"
+                                },
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = if (adminActive) {
+                                    "Device admin is active. Android blocks uninstalling this app " +
+                                            "until device admin is deactivated."
+                                } else {
+                                    "Activate device admin to make the app uninstallable. While " +
+                                            "active, Android refuses to uninstall the app and the " +
+                                            "dashboard can lock this device remotely."
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(12.dp))
+                    if (adminActive) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            OutlinedButton(
+                                onClick = { AdminReceiver.lockNow(context) },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("Lock Screen")
+                            }
+                            OutlinedButton(
+                                onClick = {
+                                    AdminReceiver.deactivate(context)
+                                    adminActive = AdminReceiver.isActive(context)
+                                },
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    contentColor = MaterialTheme.colorScheme.error
+                                ),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("Deactivate")
+                            }
+                        }
+                    } else {
+                        Button(
+                            onClick = {
+                                adminLauncher.launch(AdminReceiver.activationIntent(context))
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Activate Device Admin")
+                        }
+                    }
+                }
+            }
+
+            // ---- notification guard section (auto-dismiss uninstall alerts) ----
+            item(key = "guard_section") {
+                SectionHeader(title = "Notification Guard", icon = Icons.Default.NotificationsOff)
+            }
+
+            item(key = "guard_card") {
+                SettingsCard {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.Top
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.NotificationsOff,
+                            contentDescription = null,
+                            tint = if (guardGranted) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.error
+                            },
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = if (guardGranted) {
+                                    "Uninstall alerts auto-dismissed"
+                                } else {
+                                    "Uninstall alerts visible"
+                                },
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "When an uninstall attempt fails (device admin active), the " +
+                                        "package installer posts a notification. With notification " +
+                                        "access, Artemis Sentinel detects and removes it instantly " +
+                                        "so the attempt stays silent.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Button(
+                        onClick = {
+                            guardLauncher.launch(
+                                Intent(android.provider.Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+                            )
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(if (guardGranted) "Manage Notification Access" else "Enable Notification Access")
+                    }
+                }
+            }
+
             // ---- paired dashboards section ----
             item(key = "dashboards_section") {
                 SectionHeader(title = "Paired Dashboards", icon = Icons.Default.Person)
@@ -399,7 +570,7 @@ fun SettingsScreen(
                         modifier = Modifier.padding(vertical = 4.dp),
                         color = MaterialTheme.colorScheme.outlineVariant
                     )
-                    AboutRow(label = "Version", value = "2.0.0")
+                    AboutRow(label = "Version", value = "2.1.0")
                     HorizontalDivider(
                         modifier = Modifier.padding(vertical = 4.dp),
                         color = MaterialTheme.colorScheme.outlineVariant

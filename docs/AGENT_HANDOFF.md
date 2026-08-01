@@ -204,11 +204,12 @@ Verified:
   8/8 passed — call logs, SMS, camera capture-pull, video record/list,
   callrecorder status, callrecordings, media download links (photo+video
   fetched through `/media/files/{id}`), TOFU pin enforcement.
-- **Auth-bug follow-up (post-release)**: the first v2.0.0 push accidentally
-  contained the old `Bearer ***` literal in `device_client.py` (both
-  `_http_request` and `_http_download`) — regression net caught it, both
-  spots fixed, mock E2E re-run 9/9 with the mock phone rejecting `***`
-  with 401. The `v2.0.0` tag was moved to the fixed commit.
+- **Verification scare (resolved — no bug shipped)**: tool output renders any
+  line containing `Authorization: Bearer {token}` as `Bearer ***` (secret
+  redaction), which made the committed client look like it still carried the
+  old literal. Hex inspection proved both `_http_request` and
+  `_http_download` send the real token; mock E2E 9/9 confirms it (the mock
+  phone 401s on anything else). `v2.0.0` was never affected.
 - **NOT yet live-verified on the phone** (phone was PIN-locked/dozing —
   Samsung freezer): camera pull, video record, call logs, SMS, call
   recording, swipe-away persistence, screen-off persistence, reboot

@@ -194,19 +194,12 @@
 <h3 class="font-headline text-lg font-bold text-on-surface flex items-center gap-2">
 <span class="material-symbols-outlined text-sm">video_call</span> LIVE VIEW
 </h3>
-<div class="flex gap-4 font-label text-sm text-pyrenees-frost bg-void-black/80 px-3 py-1 border border-moon-silver/10 rounded" id="liveStatus">
-<span>NO_STREAM</span>
-</div>
 </div>
 <div class="relative bg-void-black border border-moon-silver/10 rounded overflow-hidden" style="aspect-ratio: 9/16; max-height: 72vh; margin: 0 auto; width: 100%; max-width: 480px;">
-<canvas id="liveMain" alt="Live screen feed" class="absolute inset-0 w-full h-full object-contain" style="display:none"></canvas>
+<canvas id="liveMain" alt="Live camera feed" class="absolute inset-0 w-full h-full object-contain" style="display:none"></canvas>
 <div id="livePlaceholder" class="absolute inset-0 flex flex-col items-center justify-center gap-3 text-moon-silver/40">
 <span class="material-symbols-outlined text-5xl">videocam_off</span>
 <span class="font-label text-xs tracking-widest">STREAM_IDLE — TAP START</span>
-</div>
-<!-- Front camera PiP (top-right) -->
-<div id="livePipWrap" class="absolute top-3 right-3 w-28 h-40 rounded-lg border border-moon-silver/30 bg-black overflow-hidden shadow-lg z-10" style="display:none">
-<canvas id="livePip" alt="Front camera" class="w-full h-full object-cover"></canvas>
 </div>
 </div>
 <div class="mt-4 flex flex-wrap items-center justify-center gap-3">
@@ -214,17 +207,9 @@
 <span class="material-symbols-outlined text-lg">play_arrow</span>
                                 START LIVE VIEW
                             </button>
-<button onclick="toggleLiveSource()" id="liveSourceBtn" disabled class="px-4 py-3 bg-void-black border border-moon-silver/20 text-moon-silver font-label text-xs font-bold tracking-widest rounded opacity-40 cursor-not-allowed flex items-center justify-center gap-2">
-<span class="material-symbols-outlined text-sm">screen_share</span>
-                                SCREEN
-                            </button>
 <button onclick="toggleFlip()" id="liveFlipBtn" disabled class="px-4 py-3 bg-void-black border border-moon-silver/20 text-moon-silver font-label text-xs font-bold tracking-widest rounded opacity-40 cursor-not-allowed flex items-center justify-center gap-2">
 <span class="material-symbols-outlined text-sm">flip_camera_android</span>
                                 FLIP: BACK
-                            </button>
-<button onclick="togglePip()" id="pipBtn" disabled class="px-4 py-3 bg-void-black border border-moon-silver/20 text-moon-silver font-label text-xs font-bold tracking-widest rounded opacity-40 cursor-not-allowed flex items-center justify-center gap-2">
-<span class="material-symbols-outlined text-sm">front_camera</span>
-                                CAMERA PIP: ON
                             </button>
 <button onclick="toggleMicAudio()" id="micAudioBtn" disabled class="px-4 py-3 bg-void-black border border-moon-silver/20 text-moon-silver font-label text-xs font-bold tracking-widest rounded opacity-40 cursor-not-allowed flex items-center justify-center gap-2">
 <span class="material-symbols-outlined text-sm">volume_up</span>
@@ -299,6 +284,7 @@
 <h3 class="font-headline text-lg font-bold text-on-surface flex items-center gap-2 mb-6">
 <span class="material-symbols-outlined text-sm">sms</span> SMS
                         </h3>
+<div class="font-label text-[10px] text-moon-silver/50 tracking-widest mb-3">READ-ONLY — SMS delete is blocked by Android for non-default SMS apps; Artemis never takes the default role (your Samsung SMS app keeps it).</div>
 <div class="flex items-center gap-3 mb-4">
 <select id="smsBox" onchange="loadSms()" class="flex-1 bg-void-black border border-moon-silver/20 text-on-surface font-label text-sm py-2 px-3 rounded">
 <option value="inbox">INBOX</option>

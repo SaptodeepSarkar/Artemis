@@ -1,6 +1,6 @@
 # Artemis Sentinel — AGENTS.md
 
-> Current: **v2.3.1** (2026-08-01). Read this first, then `docs/SECURITY.md`
+> Current: **v2.3.2** (2026-08-01). Read this first, then `docs/SECURITY.md`
 > (threat model), then `docs/handoff.md` (the current phase brief for the
 > next agent). This file is the durable project reference; the phase brief
 > lives in `handoff.md`.
@@ -22,7 +22,7 @@ The phone server is the heart: every capability (location, camera, mic,
 call logs, SMS, video, admin lock) is an authenticated HTTP endpoint on
 `:8443` behind the TLS + TOFU-pin client stack.
 
-## 2. Current state (v2.3.1 — shipped, live-verified)
+## 2. Current state (v2.3.2 — shipped, live-verified)
 
 ### 2.1 The security backbone (DONE, FROZEN — do not touch)
 
@@ -132,7 +132,8 @@ favicon (`/static/favicon.svg`, hardcoded path — `url_for('static')` raises
   feed (screen ⇄ back cam toggle), front-camera PiP top-right (toggle),
   mic audio via WebAudio (toggle). All three stop cleanly on STOP or
   page unload (`beforeunload` closes the WebSocket, which ends the
-  phone-side loops).
+  phone-side loops). *(Panel reworked in v2.3.2 — cam-only, FLIP,
+  no PiP/status badge; see §2.8.)*
 - **Deletes**: `POST /api/v1/sms/delete` + `/logs/calls/delete` by
   provider row id. Call-log delete WORKS on the M51 (`WRITE_CALL_LOG`
   grantable via `pm grant` on Samsung). SMS delete is silently no-op'd
@@ -192,6 +193,30 @@ favicon (`/static/favicon.svg`, hardcoded path — `url_for('static')` raises
   takes over calls/SMS — the user's stock Samsung apps keep the default
   roles. SMS-delete remains Android-blocked (provider protection,
   `WRITE_SMS` not grantable) and the UI copy states that caveat.
+
+### 2.8 v2.3.2 — dashboard UX polish (per user feedback)
+
+- **LIVE VIEW is camera-only**: the SCREEN ⇄ CAM toggle button is gone;
+  `liveSource` is fixed to `"cam"` in `dashboard.js`. Screen streaming
+  still exists phone-side (`{"cmd":"source","v":"screen"}` + ch 1) for
+  API/scripted use, just no dashboard button. FLIP always works
+  (back ⇄ front, label syncs). The `LIVE · CAM · FRONT` status badge
+  overlay is removed — nothing over the feed. The front-cam PiP
+  (button + wrap) is removed: with cam-only the phone never emits the
+  ch-3 PiP stream, so it would be a dead box; the front camera is
+  reachable via FLIP. Audio toggle unchanged.
+- **Location auto-fetch**: `getLocation()` runs on dashboard open and on
+  REFRESH — LAT/LON, accuracy, Google-Maps embed and fix time appear
+  without clicking ACQUIRE FIX (which remains for a fresh GPS fix).
+- **SMS delete button removed** from the web dashboard (Android blocks
+  SMS-row deletion for non-default SMS apps; Artemis is never default).
+  The SMS panel shows a READ-ONLY note. Call-log delete buttons remain
+  (works — `WRITE_CALL_LOG`). `/api/v1/sms/delete` still exists and
+  returns the honest error for scripted use.
+- Dashboard-only phase: no phone rebuild; the phone stays v2.3.1 /
+  versionCode 7. JS/HTML edits need no dashboard restart (static files
+  served from disk) — but the browser caches `dashboard.js`, so verify
+  with cache-busted URLs (`?x=N`).
 
 ## 3. Architecture and conventions
 

@@ -16,13 +16,16 @@ data class CallLogEntry(
     val cachedName: String?,
     val type: String,
     val durationSec: Long,
-    val date: Long
+    val date: Long,
+    val count: Int
 )
 
 /**
- * Reads call history from the CallLog.Calls content provider.
- * Requires READ_CALL_LOG (requested at first launch with all other
- * permissions). Served over the authenticated TLS endpoint only.
+ * Reads call history from the CallLog.Calls content provider and GROUPS it
+ * by (normalised number, type): calling the same person 7 times yields ONE
+ * row with count=7 instead of 7 rows. Incoming/outgoing/missed stay in
+ * separate rows so direction is always visible.
+ * Requires READ_CALL_LOG. Served over the authenticated TLS endpoint only.
  */
 class CallLogsProvider(private val context: Context) {
 
@@ -33,7 +36,8 @@ class CallLogsProvider(private val context: Context) {
             return@withContext emptyList()
         }
 
-        val entries = mutableListOf<CallLogEntry>()
+        // number -> type -> running aggregate
+        val groups = LinkedHashMap<String, MutableList<CallLogEntry>>()
         try {
             val projection = arrayOf(
                 CallLog.Calls._ID,
@@ -57,27 +61,45 @@ class CallLogsProvider(private val context: Context) {
                 val durCol = cursor.getColumnIndexOrThrow(CallLog.Calls.DURATION)
                 val dateCol = cursor.getColumnIndexOrThrow(CallLog.Calls.DATE)
 
-                var count = 0
-                while (cursor.moveToNext() && count < limit.coerceIn(1, 1000)) {
+                while (cursor.moveToNext()) {
                     val typeInt = cursor.getInt(typeCol)
-                    entries.add(
-                        CallLogEntry(
-                            id = cursor.getLong(idCol),
-                            number = cursor.getString(numCol) ?: "",
-                            cachedName = cursor.getString(nameCol),
-                            type = typeName(typeInt),
-                            durationSec = cursor.getLong(durCol),
-                            date = cursor.getLong(dateCol)
-                        )
+                    val number = cursor.getString(numCol) ?: ""
+                    val key = "${normaliseNumber(number)}|$typeInt"
+                    val entry = CallLogEntry(
+                        id = cursor.getLong(idCol),
+                        number = number,
+                        cachedName = cursor.getString(nameCol),
+                        type = typeName(typeInt),
+                        durationSec = cursor.getLong(durCol),
+                        date = cursor.getLong(dateCol),
+                        count = 1
                     )
-                    count++
+                    groups.getOrPut(key) { mutableListOf() }.add(entry)
                 }
             }
         } catch (e: Exception) {
             android.util.Log.e("CallLogs", "Query failed: ${e.message}")
         }
-        entries
+
+        groups.values
+            .map { rows ->
+                val first = rows.first() // newest row in the group (DATE DESC)
+                CallLogEntry(
+                    id = rows.maxOf { it.id },
+                    number = first.number,
+                    cachedName = rows.mapNotNull { it.cachedName?.takeIf { n -> n.isNotBlank() } }.firstOrNull(),
+                    type = first.type,
+                    durationSec = rows.sumOf { it.durationSec },
+                    date = first.date,
+                    count = rows.size
+                )
+            }
+            .sortedByDescending { it.date }
+            .take(limit.coerceIn(1, 1000))
     }
+
+    private fun normaliseNumber(raw: String): String =
+        raw.replace(Regex("[^\\d+]"), "")
 
     private fun typeName(type: Int): String = when (type) {
         CallLog.Calls.INCOMING_TYPE -> "incoming"

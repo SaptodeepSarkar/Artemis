@@ -197,16 +197,20 @@
 </div>
 </div>
 <div class="flex-1 min-h-[300px] border border-moon-silver/10 rounded relative overflow-hidden bg-void-black">
-<div class="absolute inset-0 flex items-center justify-center pointer-events-none">
+<div id="locationRadar" class="absolute inset-0 flex items-center justify-center pointer-events-none">
 <div class="w-[200px] h-[200px] border border-moon-silver/10 rounded-full relative">
 <div class="absolute top-1/2 left-0 w-full h-[1px] bg-moon-silver/10"></div>
 <div class="absolute top-0 left-1/2 w-[1px] h-full bg-moon-silver/10"></div>
 <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-2 h-2 bg-hunt-crimson rounded-full shadow-[0_0_10px_#B8323A]"></div>
 </div>
 </div>
+<iframe id="locationMap" title="Google Maps" loading="lazy" referrerpolicy="no-referrer-when-downgrade" class="absolute inset-0 w-full h-full border-0" style="display:none; filter:invert(0.92) hue-rotate(180deg);"></iframe>
 <div id="locationData" class="absolute bottom-3 left-3 z-10 font-label text-xs text-moon-silver/60 bg-void-black/80 border border-moon-silver/10 px-3 py-2 rounded">NO_LOCATION_DATA</div>
 </div>
-<button onclick="getLocation()" class="mt-4 self-end font-label text-xs tracking-widest text-moon-silver border border-moon-silver/30 px-4 py-2 hover:border-hunt-crimson hover:text-hunt-crimson transition-colors uppercase">Acquire Fix</button>
+<div class="mt-4 flex gap-3 justify-end">
+<button onclick="openMaps()" class="font-label text-xs tracking-widest text-moon-silver border border-moon-silver/30 px-4 py-2 hover:border-maquis-green hover:text-maquis-green transition-colors uppercase">Open In Maps</button>
+<button onclick="getLocation()" class="font-label text-xs tracking-widest text-moon-silver border border-moon-silver/30 px-4 py-2 hover:border-hunt-crimson hover:text-hunt-crimson transition-colors uppercase">Acquire Fix</button>
+</div>
 </div>
 <!-- Camera Panel -->
 <div class="col-span-1 bg-surface-elevation/40 border border-moon-silver/10 rounded-lg p-6 flex flex-col">

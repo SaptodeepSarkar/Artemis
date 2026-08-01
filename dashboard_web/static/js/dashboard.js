@@ -85,19 +85,35 @@ async function loadDeviceInfo() {
 }
 
 // Location
+let lastFix = null;
 async function getLocation() {
     const { host, port } = getHostPort();
     const data = await api(`/api/device/${host}/${port}/location`);
     if (!data) return;
     const box = document.getElementById("locationData");
     const coords = document.getElementById("locationCoords");
+    const map = document.getElementById("locationMap");
+    const radar = document.getElementById("locationRadar");
     if (data.latitude && data.longitude) {
+        const lat = data.latitude, lng = data.longitude;
+        lastFix = { lat, lng };
         coords.innerHTML =
-            `<span>LAT: ${data.latitude.toFixed(4)}</span><span class="text-moon-silver/30">|</span><span>LON: ${data.longitude.toFixed(4)}</span>`;
+            `<span>LAT: ${lat.toFixed(4)}</span><span class="text-moon-silver/30">|</span><span>LON: ${lng.toFixed(4)}</span>` +
+            (data.accuracy ? `<span class="text-moon-silver/40">±${Math.round(data.accuracy)}m</span>` : "");
         box.textContent = `FIX_ACQUIRED: ${new Date(data.timestamp || Date.now()).toLocaleTimeString()}`;
+        if (map) {
+            map.src = `https://maps.google.com/maps?q=${lat},${lng}&z=16&output=embed`;
+            map.style.display = "block";
+        }
+        if (radar) radar.style.display = "none";
     } else {
         box.textContent = data.error === "no_location" ? "NO_GPS_FIX" : JSON.stringify(data);
     }
+}
+
+function openMaps() {
+    if (!lastFix) { getLocation(); return; }
+    window.open(`https://maps.google.com/maps?q=${lastFix.lat},${lastFix.lng}&z=16`, "_blank");
 }
 
 // Camera
@@ -195,8 +211,8 @@ async function loadCallLogs() {
         <div class="flex items-center gap-3 p-3 border border-moon-silver/10 rounded">
             <span class="material-symbols-outlined text-sm ${callTypeColor(c.type)}">${callTypeIcon(c.type)}</span>
             <div class="flex-1 min-w-0">
-                <div class="font-label text-sm text-on-surface truncate">${esc(c.number || "unknown")}${c.cachedName ? " · " + esc(c.cachedName) : ""}</div>
-                <div class="font-label text-[10px] text-moon-silver/50">${esc((c.type || "unknown").toUpperCase())} · ${fmtDur(c.durationSec)} · ${new Date(c.date).toLocaleString()}</div>
+                <div class="font-label text-sm text-on-surface truncate">${esc(c.number || "unknown")}${c.cachedName ? " · " + esc(c.cachedName) : ""}${c.count > 1 ? ` <span class="text-hunt-crimson font-bold">(${c.count})</span>` : ""}</div>
+                <div class="font-label text-[10px] text-moon-silver/50">${esc(String(c.type || "unknown").toUpperCase())} · ${fmtDur(c.durationSec)}${c.count > 1 ? " TOTAL" : ""} · ${new Date(c.date).toLocaleString()}</div>
             </div>
         </div>`).join("");
 }

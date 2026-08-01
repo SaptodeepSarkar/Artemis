@@ -168,7 +168,8 @@
 <span class="font-label text-xs text-moon-silver/50 tracking-widest">BATTERY</span>
 <span class="material-symbols-outlined text-moon-silver/80">battery_5_bar</span>
 </div>
-<div class="font-headline text-2xl font-bold text-on-surface value">—</div>
+<div class="font-headline text-2xl font-bold text-on-surface value" id="statusBatteryValue">—</div>
+<div class="font-label text-[11px] text-moon-silver/50 mt-1" id="statusBatteryDetail">WAITING_FOR_DATA</div>
 </div>
 <div class="bg-surface-elevation/40 border border-moon-silver/10 rounded-lg p-5 flex flex-col justify-between hover:border-moon-silver/30 transition-colors backdrop-blur-sm" id="statusUptime">
 <div class="flex items-center justify-between mb-4">
@@ -187,6 +188,46 @@
 </div>
 <!-- Main Bento Grid -->
 <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+<!-- Live View Panel (video call area) -->
+<div class="col-span-1 lg:col-span-3 bg-surface-elevation/40 border border-moon-silver/10 rounded-lg p-6 flex flex-col relative overflow-hidden">
+<div class="flex items-center justify-between mb-6 z-10 relative">
+<h3 class="font-headline text-lg font-bold text-on-surface flex items-center gap-2">
+<span class="material-symbols-outlined text-sm">video_call</span> LIVE VIEW
+</h3>
+<div class="flex gap-4 font-label text-sm text-pyrenees-frost bg-void-black/80 px-3 py-1 border border-moon-silver/10 rounded" id="liveStatus">
+<span>NO_STREAM</span>
+</div>
+</div>
+<div class="relative bg-void-black border border-moon-silver/10 rounded overflow-hidden" style="aspect-ratio: 9/16; max-height: 72vh; margin: 0 auto; width: 100%; max-width: 480px;">
+<img id="liveMain" alt="Live screen feed" class="absolute inset-0 w-full h-full object-contain" style="display:none"/>
+<div id="livePlaceholder" class="absolute inset-0 flex flex-col items-center justify-center gap-3 text-moon-silver/40">
+<span class="material-symbols-outlined text-5xl">videocam_off</span>
+<span class="font-label text-xs tracking-widest">STREAM_IDLE — TAP START</span>
+</div>
+<!-- Front camera PiP (top-right) -->
+<div id="livePipWrap" class="absolute top-3 right-3 w-28 h-40 rounded-lg border border-moon-silver/30 bg-black overflow-hidden shadow-lg z-10" style="display:none">
+<img id="livePip" alt="Front camera" class="w-full h-full object-cover"/>
+</div>
+</div>
+<div class="mt-4 flex flex-wrap items-center justify-center gap-3">
+<button onclick="toggleLiveView()" id="liveBtn" class="px-6 py-3 bg-hunt-crimson/10 border border-hunt-crimson/50 text-hunt-crimson font-label text-sm font-bold tracking-widest rounded hover:bg-hunt-crimson hover:text-white transition-all flex items-center justify-center gap-2">
+<span class="material-symbols-outlined text-lg">play_arrow</span>
+                                START LIVE VIEW
+                            </button>
+<button onclick="toggleLiveSource()" id="liveSourceBtn" disabled class="px-4 py-3 bg-void-black border border-moon-silver/20 text-moon-silver font-label text-xs font-bold tracking-widest rounded opacity-40 cursor-not-allowed flex items-center justify-center gap-2">
+<span class="material-symbols-outlined text-sm">screen_share</span>
+                                SCREEN
+                            </button>
+<button onclick="togglePip()" id="pipBtn" disabled class="px-4 py-3 bg-void-black border border-moon-silver/20 text-moon-silver font-label text-xs font-bold tracking-widest rounded opacity-40 cursor-not-allowed flex items-center justify-center gap-2">
+<span class="material-symbols-outlined text-sm">front_camera</span>
+                                CAMERA PIP: ON
+                            </button>
+<button onclick="toggleMicAudio()" id="micAudioBtn" disabled class="px-4 py-3 bg-void-black border border-moon-silver/20 text-moon-silver font-label text-xs font-bold tracking-widest rounded opacity-40 cursor-not-allowed flex items-center justify-center gap-2">
+<span class="material-symbols-outlined text-sm">volume_up</span>
+                                AUDIO: OFF
+                            </button>
+</div>
+</div>
 <!-- Location Panel -->
 <div class="col-span-1 lg:col-span-2 bg-surface-elevation/40 border border-moon-silver/10 rounded-lg p-6 flex flex-col relative overflow-hidden">
 <div class="flex items-center justify-between mb-6 z-10 relative">
@@ -230,10 +271,6 @@
 </div>
 <div id="cameraData" class="hidden"></div>
 <div class="mt-auto pt-6 space-y-3">
-<button onclick="capturePhotoPull()" id="captureBtn" class="w-full py-4 bg-hunt-crimson/10 border border-hunt-crimson/50 text-hunt-crimson font-label text-sm font-bold tracking-widest rounded hover:bg-hunt-crimson hover:text-white transition-all flex items-center justify-center gap-2 group">
-<span class="material-symbols-outlined text-lg group-hover:scale-110 transition-transform">camera_enhance</span>
-                                    CAPTURE
-                                </button>
 <button onclick="recordVideo(5000)" id="videoBtn" class="w-full py-2.5 bg-pyrenees-frost/10 border border-pyrenees-frost/50 text-pyrenees-frost font-label text-xs font-bold tracking-widest rounded hover:bg-pyrenees-frost hover:text-white transition-all flex items-center justify-center gap-2">
 <span class="material-symbols-outlined text-lg">videocam</span>
                                     REC 5S

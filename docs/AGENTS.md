@@ -1,6 +1,6 @@
 # Artemis Sentinel — AGENTS.md
 
-> Current: **v2.2.0** (2026-08-01). Read this first, then `docs/SECURITY.md`
+> Current: **v2.3.0** (2026-08-01). Read this first, then `docs/SECURITY.md`
 > (threat model), then `docs/handoff.md` (the current phase brief for the
 > next agent). This file is the durable project reference; the phase brief
 > lives in `handoff.md`.
@@ -22,7 +22,7 @@ The phone server is the heart: every capability (location, camera, mic,
 call logs, SMS, video, admin lock) is an authenticated HTTP endpoint on
 `:8443` behind the TLS + TOFU-pin client stack.
 
-## 2. Current state (v2.2.0 — shipped, live-verified)
+## 2. Current state (v2.3.0 — shipped, live-verified)
 
 ### 2.1 The security backbone (DONE, FROZEN — do not touch)
 
@@ -51,12 +51,18 @@ call logs, SMS, video, admin lock) is an authenticated HTTP endpoint on
 | `/api/v1/location/current`, `/history` | ✓ |
 | `/api/v1/camera/*` (list, capture, captures, file) | ✓ |
 | `/api/v1/mic/record/*` (start/stop/recordings/file) | ✓ |
-| `/api/v1/logs/calls`, `/api/v1/sms` | ✓ |
+| `/api/v1/mic/stream` (live PCM16 44.1kHz for the video-call audio) | ✓ |
+| `/api/v1/logs/calls`, `/api/v1/sms` (+ `POST .../delete` by row id) | ✓ |
 | `/api/v1/callrecorder/*`, `/api/v1/callrecordings/*` | ✓ |
 | `/api/v1/video/record`, `/list`, `/{id}`, `/{id}/file` | ✓ |
 | `/api/v1/admin/lock` (device-admin lockNow) | ✓ |
-| Screen recording / screenshots | ✗ NOT built (MediaProjection needs per-session consent on Android 10+) |
-| File browser (list/download/upload) | ✗ NOT built |
+| `/api/v1/battery` (BatteryHelper — dashboard header) | ✓ |
+| `/api/v1/screen/status`, `/screen/capture` (accessibility-first) | ✓ |
+| `/api/v1/stream/screen`, `/stream/camera`, `/stream/mic` (MJPEG/PCM live) | ✓ |
+| `/api/v1/files/list`, `/download`, `/upload` (app-scoped root) | ✓ |
+| `/api/v1/contacts` (READ_CONTACTS) | ✓ |
+| Camera feed: `/api/v1/camera/feed/start`, `/stop`, `/latest` | ✓ |
+| Screen recording / screenshots | ✓ accessibility `takeScreenshot` (API 30+), ZERO consent dialogs; MediaProjection kept only as documented fallback |
 
 ### 2.3 24/7 persistence (v2.2.0 — live-verified)
 
@@ -100,6 +106,45 @@ call logs, SMS, video, admin lock) is an authenticated HTTP endpoint on
 favicon (`/static/favicon.svg`, hardcoded path — `url_for('static')` raises
 `NoMatchFound` on this Starlette).
 
+### 2.6 v2.3.0 — video-call helpers, zero-consent screen capture, deletes, battery
+
+- **Consent-free screen capture (the big one)**: `RemoteControlService`
+  (an `AccessibilityService`, `canTakeScreenshot`, API 30+) does the
+  capture via `takeScreenshot()` — NO MediaProjection consent dialog, NO
+  per-capture prompts, works with the app swiped away. ONE accessibility
+  service handles remote-control input AND capture. One-time enable:
+  `settings put secure enabled_accessibility_services
+  com.example.artemis/com.example.artemis.feature.RemoteControlService`
+  (or the phone dashboard's ENABLE button) — survives `install -r` and
+  reboot. MediaProjection (`ScreenCaptureService` FGS) remains only as a
+  documented fallback (`/screen/status` returns `method`).
+- **Live streams (MJPEG/PCM)**: `GET /api/v1/stream/screen` and
+  `/stream/camera?camera=front|back` are `multipart/x-mixed-replace`
+  MJPEG streams (per-frame `--frame` boundaries, `Connection: close`,
+  no Content-Length); `/stream/mic` is raw PCM16 mono 44.1kHz. The
+  browser renders MJPEG natively in an `<img>`. Screen ~2.5 fps;
+  camera ~0.5–0.7 fps (CameraX single-capture latency on M51 — known
+  limit; a preview-stream feed is the future optimization).
+- **Dashboard LIVE VIEW panel** replaces the old capture button: main
+  feed (screen ⇄ back cam toggle), front-camera PiP top-right (toggle),
+  mic audio via WebAudio (toggle). All three stop cleanly on STOP or
+  page unload (`beforeunload` clears img src + aborts the fetch, which
+  ends the phone-side loops).
+- **Deletes**: `POST /api/v1/sms/delete` + `/logs/calls/delete` by
+  provider row id. Call-log delete WORKS on the M51 (`WRITE_CALL_LOG`
+  grantable via `pm grant` on Samsung). SMS delete is silently no-op'd
+  by Android unless Artemis is the default SMS app — the phone dashboard
+  has SET DEFAULT SMS / SET DEFAULT DIALER buttons
+  (`Telephony.Sms.getDefaultSmsPackage` / `TelecomManager` pickers) and
+  the API returns a clear message instead of a crash.
+- **BatteryHelper**: `GET /api/v1/battery` → levelPercent, isCharging,
+  chargeSource, status, health, temperatureC, voltageMv, technology.
+  Dashboard status card shows `54% · none · 32.7°C · 3.82V`.
+- Streaming server plumbing: `HttpResponse.streamBody` (suspend lambda)
+  + `sendStreamHead()` for chunked/streamed bodies; stream handlers run
+  on the worker coroutine and close the socket on end (and on client
+  disconnect).
+
 ## 3. Architecture and conventions
 
 ### 3.1 Phone server pattern (`Artiest/.../server/SimpleHttpServer.kt`)
@@ -124,7 +169,9 @@ favicon (`/static/favicon.svg`, hardcoded path — `url_for('static')` raises
 
 One provider class per capability: `LocationTracker`, `CameraController`,
 `MicController`, `CallRecorder`, `VideoRecorder`, `CallLogsProvider`,
-`SmsProvider`, `DeviceInfoProvider`, `RemoteControlService`. Handlers in
+`SmsProvider`, `DeviceInfoProvider`, `RemoteControlService`,
+`CameraFeedController`, `ScreenCaptureController`, `FileSystemHelper`,
+`ContactsProvider`, `BatteryHelper`. Handlers in
 `SimpleHttpServer` call these. Permissions go through
 `permissions/PermissionManager.kt`.
 
@@ -179,6 +226,10 @@ UI is not open** (FGS-only, no Activity dependency).
 
 ## 6. Version history
 
+- **v2.3.0** — helpers phase + video-call: consent-free accessibility
+  screen capture, MJPEG screen/camera streams + PCM mic stream, LIVE
+  VIEW dashboard panel (PiP front cam, audio toggle), SMS/call-log
+  delete, BatteryHelper, camera feed, files, contacts.
 - **v2.2.0** (`deb8b11`, tag `v2.2.0`) — 24/7 persistence: battery-opt
   exemption, dynamic Doze-exit re-arm, indefinite wake lock, zombie-socket
   fix, boot auto-start (live-verified after reboot).

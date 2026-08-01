@@ -44,6 +44,14 @@ class MicController(private val context: Context) {
     private var currentRecordingFile: File? = null
     private var currentRecordingStartTime: Long = 0L
 
+    // Live PCM streaming (v2.3.0 video-call mic): one AudioRecord feeding
+    // any number of server stream listeners. Chunks are 16-bit mono PCM at
+    // SAMPLE_RATE; the dashboard plays them via WebAudio.
+    private val liveListeners = java.util.concurrent.CopyOnWriteArrayList<kotlinx.coroutines.channels.Channel<ByteArray>>()
+    private var liveJob: Job? = null
+    private var liveAudioRecord: AudioRecord? = null
+    val isStreaming: Boolean get() = liveJob?.isActive == true
+
     // Ring buffer for live streaming
     private val streamBuffer = ArrayDeque<ByteArray>(10)
 
@@ -68,6 +76,9 @@ class MicController(private val context: Context) {
 
         if (isRecording) {
             return@withContext Result.failure(IllegalStateException("Already recording"))
+        }
+        if (isStreaming) {
+            return@withContext Result.failure(IllegalStateException("Mic is busy streaming to the dashboard"))
         }
 
         try {
@@ -269,6 +280,96 @@ class MicController(private val context: Context) {
         }
     }
 
+    // ============================================================
+    // Live PCM streaming (v2.3.0) — the video-call mic path.
+    // A single AudioRecord loop fans out 16-bit mono PCM chunks to every
+    // subscribed Channel. No file I/O; stops when the last listener leaves.
+    // ============================================================
+
+    /**
+     * Subscribe to the live mic stream. Returns a channel of raw PCM chunks
+     * (16-bit mono, 44100 Hz) or null when the mic is busy / not permitted.
+     * The caller MUST [stopLiveStream] when done (client disconnect).
+     */
+    fun startLiveStream(): kotlinx.coroutines.channels.Channel<ByteArray>? {
+        synchronized(this) {
+            if (isRecording) return null // file recording owns the mic
+            if (!hasMicPermission()) return null
+        }
+        val channel = kotlinx.coroutines.channels.Channel<ByteArray>(capacity = 64)
+        liveListeners.add(channel)
+        ensureLiveCaptureRunning()
+        return channel
+    }
+
+    /** Unsubscribe one listener; stops the shared AudioRecord when empty. */
+    fun stopLiveStream(channel: kotlinx.coroutines.channels.Channel<ByteArray>) {
+        liveListeners.remove(channel)
+        channel.close()
+        if (liveListeners.isEmpty()) stopLiveCaptureInternal()
+    }
+
+    /** Kill every live stream (service shutdown). */
+    fun stopAllLiveStreams() {
+        liveListeners.forEach { it.close() }
+        liveListeners.clear()
+        stopLiveCaptureInternal()
+    }
+
+    private fun ensureLiveCaptureRunning() {
+        synchronized(this) {
+            if (liveJob?.isActive == true) return
+            if (liveListeners.isEmpty()) return
+            if (!hasMicPermission()) return
+            try {
+                val bufferSize = maxOf(
+                    AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT),
+                    4096
+                )
+                val record = AudioRecord(
+                    MediaRecorder.AudioSource.MIC, SAMPLE_RATE,
+                    CHANNEL_CONFIG, AUDIO_FORMAT, bufferSize
+                )
+                record.startRecording()
+                liveAudioRecord = record
+                liveJob = GlobalScope.launch(Dispatchers.IO) {
+                    val buffer = ByteArray(bufferSize)
+                    try {
+                        while (isActive) {
+                            val n = record.read(buffer, 0, buffer.size)
+                            if (n > 0) {
+                                val chunk = buffer.copyOf(n)
+                                liveListeners.forEach { ch ->
+                                    // Drop the new chunk when a listener is
+                                    // slow — live audio prefers fresh over
+                                    // complete, and the browser recovers.
+                                    ch.trySend(chunk)
+                                }
+                            } else {
+                                delay(10)
+                            }
+                        }
+                    } catch (_: Exception) {
+                    } finally {
+                        stopLiveCaptureInternal()
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("MicController", "Live stream start failed: ${e.message}")
+            }
+        }
+    }
+
+    private fun stopLiveCaptureInternal() {
+        synchronized(this) {
+            liveJob?.cancel()
+            liveJob = null
+            try { liveAudioRecord?.stop() } catch (_: Exception) { }
+            try { liveAudioRecord?.release() } catch (_: Exception) { }
+            liveAudioRecord = null
+        }
+    }
+
     fun getRecordings(): List<AudioRecording> {
         synchronized(recordings) {
             return recordings.toList()
@@ -309,6 +410,7 @@ class MicController(private val context: Context) {
 
     /** Clean up resources */
     fun release() {
+        stopAllLiveStreams()
         if (isRecording) {
             recordingJob?.cancel()
             stopRecordingInternal()

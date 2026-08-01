@@ -16,6 +16,14 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SYSTEM_EXEMPTED" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+
+    <!-- Full file access (optional: "All files access" Settings grant, or
+         legacy READ_EXTERNAL_STORAGE on API 29) for the files helper -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
 
     <!-- POST_NOTIFICATIONS (Android 13+) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -37,10 +45,12 @@
     <!-- SMS -->
     <uses-permission android:name="android.permission.READ_SMS" />
     <uses-permission android:name="android.permission.RECEIVE_SMS" />
+    <uses-permission android:name="android.permission.WRITE_SMS" />
 
     <!-- Phone / Call -->
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
     <uses-permission android:name="android.permission.READ_CALL_LOG" />
+    <uses-permission android:name="android.permission.WRITE_CALL_LOG" />
 
     <!-- Screen capture / overlay -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
@@ -91,7 +101,18 @@
             android:foregroundServiceType="dataSync|camera|microphone|location|mediaPlayback|connectedDevice"
             android:stopWithTask="false" />
 
-        <!-- Accessibility Service -->
+        <!-- Screen capture consent holder: MediaProjection must be adopted by
+             a foreground service with type mediaProjection on Android 14+.
+             Runs only while a consent is active. -->
+        <service
+            android:name=".service.ScreenCaptureService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection"
+            android:stopWithTask="false" />
+
+        <!-- Accessibility Service — one service for remote control input AND
+             screen capture (takeScreenshot needs no consent dialog, unlike
+             MediaProjection). One-time enable in Settings. -->
         <service
             android:name=".feature.RemoteControlService"
             android:exported="false"

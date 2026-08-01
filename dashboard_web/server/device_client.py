@@ -7,7 +7,7 @@ import ssl
 import time
 import urllib.parse
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Iterator
 
 
 @dataclass
@@ -371,3 +371,109 @@ def video_file(host: str, token: str, video_id: str, port: int = 8443,
         host, f"/api/v1/video/{video_id}/file",
         token=token, port=port, timeout=120.0, cert_fp=cert_fp,
     )
+
+
+def battery(host: str, token: str, port: int = 8443,
+            cert_fp: str | None = None) -> tuple[dict, str]:
+    """GET /api/v1/battery — battery helper for the dashboard header."""
+    _, j, pin = _http_request(
+        host, "GET", "/api/v1/battery",
+        token=token, port=port, cert_fp=cert_fp,
+    )
+    return j, pin
+
+
+def screen_status(host: str, token: str, port: int = 8443,
+                  cert_fp: str | None = None) -> tuple[dict, str]:
+    """GET /api/v1/screen/status — capture backend + method for live view."""
+    _, j, pin = _http_request(
+        host, "GET", "/api/v1/screen/status",
+        token=token, port=port, cert_fp=cert_fp,
+    )
+    return j, pin
+
+
+def sms_delete(host: str, msg_id: int, token: str, port: int = 8443,
+               cert_fp: str | None = None) -> tuple[dict, str]:
+    """POST /api/v1/sms/delete — delete one SMS by row id."""
+    _, j, pin = _http_request(
+        host, "POST", "/api/v1/sms/delete",
+        body={"id": msg_id}, token=token, port=port, cert_fp=cert_fp,
+    )
+    return j, pin
+
+
+def calllog_delete(host: str, entry_id: int, token: str, port: int = 8443,
+                   cert_fp: str | None = None) -> tuple[dict, str]:
+    """POST /api/v1/logs/calls/delete — delete one call-log row by id."""
+    _, j, pin = _http_request(
+        host, "POST", "/api/v1/logs/calls/delete",
+        body={"id": entry_id}, token=token, port=port, cert_fp=cert_fp,
+    )
+    return j, pin
+
+
+def stream(host: str, path: str, token: str | None = None, port: int = 8443,
+           cert_fp: str | None = None, connect_timeout: float = 8.0,
+           read_timeout: float = 30.0) -> Iterator[bytes]:
+    """Generator over a long-lived stream body (MJPEG / raw PCM).
+
+    The phone's server writes until the client disconnects (HTTP/1.0,
+    Connection: close, no Content-Length). Yields raw body bytes; raises
+    RuntimeError with the JSON error on non-200 responses. The caller must
+    stop iterating (and close the generator) to end the stream — that
+    disconnect is what makes the phone stop capturing.
+    """
+    ctx = _make_tls_context()
+    s = socket.socket()
+    s.settimeout(connect_timeout)
+    tls = None
+    try:
+        s.connect((host, port))
+        tls = ctx.wrap_socket(s, server_hostname=host)
+
+        peer_der = tls.getpeercert(binary_form=True)
+        observed_pin = _pin_of(peer_der) if peer_der else ""
+        if cert_fp and observed_pin and not hmac.compare_digest(cert_fp, observed_pin):
+            raise RuntimeError("cert_mismatch")
+
+        req = f"GET {path} HTTP/1.0\r\nHost: {host}\r\n"
+        if token:
+            req += f"Authorization: Bearer {token}\r\n"
+        req += "Connection: close\r\n\r\n"
+        tls.sendall(req.encode())
+
+        tls.settimeout(read_timeout)
+
+        header_buf = b""
+        while b"\r\n\r\n" not in header_buf:
+            chunk = tls.recv(4096)
+            if not chunk:
+                raise RuntimeError("connection closed before response headers")
+            header_buf += chunk
+        head, _, rest = header_buf.partition(b"\r\n\r\n")
+
+        status_line = head.split(b"\r\n", 1)[0].decode("latin-1", errors="replace")
+        parts = status_line.split(" ", 2)
+        status = int(parts[1]) if len(parts) >= 2 else 0
+        if status != 200:
+            err_text = rest.decode("utf-8", errors="replace")[:300]
+            raise RuntimeError(f"stream status {status}: {err_text}")
+
+        if rest:
+            yield rest
+        while True:
+            chunk = tls.recv(65536)
+            if not chunk:
+                break
+            yield chunk
+    finally:
+        try:
+            if tls:
+                tls.close()
+        except Exception:
+            pass
+        try:
+            s.close()
+        except Exception:
+            pass

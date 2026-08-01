@@ -107,13 +107,16 @@ class LocationTracker(
 
     /**
      * Get the current location.
-     * Returns cached value if fresh (< 30s), otherwise requests a fresh one.
+     * Returns cached value if fresh (< 30s) unless [forceFresh] is set
+     * (dashboard live-tracking poll).
      */
-    suspend fun getCurrentLocation(): LocationPoint? = withContext(Dispatchers.IO) {
+    suspend fun getCurrentLocation(forceFresh: Boolean = false): LocationPoint? = withContext(Dispatchers.IO) {
         // Return cached if fresh enough
-        lastLocation?.let { loc ->
-            if (System.currentTimeMillis() - loc.timestamp < 30_000L) {
-                return@withContext loc
+        if (!forceFresh) {
+            lastLocation?.let { loc ->
+                if (System.currentTimeMillis() - loc.timestamp < 30_000L) {
+                    return@withContext loc
+                }
             }
         }
 

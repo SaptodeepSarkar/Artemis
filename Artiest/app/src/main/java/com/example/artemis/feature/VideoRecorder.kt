@@ -14,7 +14,7 @@ import androidx.camera.video.Recording
 import androidx.camera.video.VideoCapture
 import androidx.camera.video.VideoRecordEvent
 import androidx.core.content.ContextCompat
-import androidx.lifecycle.ProcessLifecycleOwner
+import androidx.lifecycle.LifecycleOwner
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -44,7 +44,12 @@ data class VideoRecording(
  * photo capture and video recording serialize through the server's camera
  * mutex and unbind after each use.
  */
-class VideoRecorder(private val context: Context) {
+class VideoRecorder(
+    private val context: Context,
+    /** CameraX binds to this lifecycle — must stay STARTED with the app
+     *  closed (the foreground service's LifecycleService lifecycle). */
+    private val lifecycleOwner: LifecycleOwner
+) {
 
     private val videosDir: File = File(context.filesDir, "videos").also { it.mkdirs() }
     private val executor = Executors.newSingleThreadExecutor()
@@ -99,11 +104,16 @@ class VideoRecorder(private val context: Context) {
                 val videoCapture = VideoCapture.withOutput(recorder)
 
                 val cameraProvider = ProcessCameraProvider.getInstance(context).get()
-                cameraProvider.bindToLifecycle(
-                    ProcessLifecycleOwner.get(),
-                    cameraSelector,
-                    videoCapture
-                )
+                // CameraX requires main thread + a lifecycle that stays
+                // STARTED with the app closed (the service's, not the
+                // process owner — it drops below STARTED with no Activity).
+                withContext(Dispatchers.Main.immediate) {
+                    cameraProvider.bindToLifecycle(
+                        lifecycleOwner,
+                        cameraSelector,
+                        videoCapture
+                    )
+                }
 
                 val outputOptions = FileOutputOptions.Builder(file).build()
                 val recording = recorder
@@ -134,7 +144,9 @@ class VideoRecorder(private val context: Context) {
                 }
 
                 isRecording = false
-                try { cameraProvider.unbindAll() } catch (_: Exception) { }
+                withContext(Dispatchers.Main.immediate) {
+                    try { cameraProvider.unbindAll() } catch (_: Exception) { }
+                }
 
                 val entry = synchronized(videos) {
                     videos.find { it.filePath == file.absolutePath }

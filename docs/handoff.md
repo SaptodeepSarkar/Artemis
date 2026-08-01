@@ -1,152 +1,116 @@
-# Artemis Sentinel — Handoff: Server-Callable Helpers
+# Artemis Sentinel — Handoff: Video-Call / LIVE VIEW (v2.3.0)
 
-> Written 2026-08-01, after v2.2.0 (`deb8b11`) shipped and was pushed.
-> THIS is the current phase brief. Read `docs/AGENTS.md` first (project
-> reference + frozen-sector rules), then `docs/SECURITY.md` (threat model),
-> then this document, then the source.
+> Written 2026-08-01, after v2.3.0 shipped (helpers + video-call phase,
+> live-verified). Read `docs/AGENTS.md` first (project reference +
+> frozen-sector rules), then `docs/SECURITY.md` (threat model), then this
+> document, then the source.
 
 ---
 
-## 1. The mission
+## 1. DONE — what shipped in v2.3.0 (all live-verified on the M51)
 
-**Build a set of server-callable "helpers" — location, camera feed,
-screen, files/assets, etc. — and expose them as authenticated endpoints on
-the phone's `SimpleHttpServer` (`:8443`), so they work even when the app
-UI is NOT open (the foreground service keeps the server alive; the helpers
-must not depend on an Activity).**
+### 1.1 Zero-consent screen capture (accessibility pivot)
 
-User directive (verbatim intent):
+User directive: "the app is a device admin so it should not require
+consent for anything."
 
-> "start building helpers like the location helper, camera feed helper,
-> screen helper, files/assets helper, etc., so that the server can call
-> them even if the app is not opened."
+- `feature/RemoteControlService.kt` — the EXISTING accessibility service
+  (remote-control input) now also captures: `takeScreenshot()` (API 30+,
+  `canTakeScreenshot="true"` in `res/xml/accessibility_service_config.xml`).
+  ONE service = remote control + screen capture (one Settings toggle).
+- `feature/ScreenCaptureController.kt` — accessibility-first `captureFrame()`;
+  MediaProjection (`service/ScreenCaptureService.kt`) kept only as
+  documented fallback. `/screen/status` returns `enabled/active/method`.
+- VERIFIED: `POST /screen/capture` → valid JPEG with ZERO dialogs, app
+  swiped away, and after `install -r`. Enable (one-time):
+  `settings put secure enabled_accessibility_services
+  com.example.artemis/com.example.artemis.feature.RemoteControlService;
+  settings put secure accessibility_enabled 1` — survives reinstall/reboot.
 
-## 2. What exists already (do NOT rebuild these — extend or wire them)
+### 1.2 Live streams (the "video call" area)
 
-The phone app already has one provider class per capability, all under
-`Artiest/app/src/main/java/com/example/artemis/feature/`:
+- `GET /api/v1/stream/screen` — MJPEG (`multipart/x-mixed-replace`),
+  ~2.5 fps, frame ≈ 160 KB (accessibility backend).
+- `GET /api/v1/stream/camera?camera=front|back` — MJPEG, ~0.5–0.7 fps
+  (CameraX single-capture latency; known limit, preview-stream feed is
+  the future optimization).
+- `GET /api/v1/stream/mic` — raw PCM16 mono 44.1 kHz (Microphone +
+  AudioRecord loop → synchronized buffer; recording and streaming are
+  mutually exclusive).
+- Server plumbing: `HttpResponse.streamBody` (suspend lambda) +
+  `sendStreamHead()`; stream ends on client disconnect (socket close).
 
-| Capability | Provider | Endpoints live today |
-|---|---|---|
-| Location | `LocationTracker.kt` | `GET /api/v1/location/current`, `GET /api/v1/location/history` |
-| Camera (single shot) | `CameraController.kt` | `GET /api/v1/camera/list`, `POST /api/v1/camera/capture`, `GET /api/v1/camera/captures`, `GET /api/v1/camera/captures/{id}`, `GET .../{id}/file` |
-| Mic | `MicController.kt` | `POST /api/v1/mic/record/start`, `.../stop`, `GET /api/v1/mic/recordings`, `.../{id}`, `.../{id}/file` |
-| Call recorder | `CallRecorder.kt` | `POST /api/v1/callrecorder/toggle`, `GET .../status`, `GET /api/v1/callrecordings`, `.../{id}`, `.../{id}/file` |
-| Video recorder | `VideoRecorder.kt` | `POST /api/v1/video/record`, `GET /api/v1/video/list`, `GET /api/v1/video/{id}`, `GET .../{id}/file` |
-| Call logs | `CallLogsProvider.kt` | `GET /api/v1/logs/calls` |
-| SMS | `SmsProvider.kt` | `GET /api/v1/sms` |
-| Device info | `DeviceInfoProvider.kt` | `GET /api/v1/device/info`, `.../battery`, `.../network`, `.../storage` |
+### 1.3 Dashboard LIVE VIEW panel (replaces the capture button)
 
-The server pattern to follow (see `server/SimpleHttpServer.kt`):
+- `dashboard_web/templates/dashboard.html` + `static/js/dashboard.js`:
+  main feed img (screen ⇄ back-cam toggle), front-cam PiP top-right
+  (toggle), mic audio via WebAudio ScriptProcessor (toggle), STOP button,
+  `beforeunload` kills all streams. Battery card in the status strip.
+- Web proxies: `/api/device/{host}/{port}/stream/{screen,camera,mic}`,
+  `.../battery`, `.../screen/status`, `.../sms/delete`,
+  `.../logs/calls/delete` (`server/device_client.py` `stream()` =
+  socket-stream generator → FastAPI `StreamingResponse`).
+- VERIFIED in-browser: screen feed 1080×2400, PiP 960×720, audio queue
+  filling, all toggles, clean stop.
 
-- Raw `ServerSocket` + TLS on **8443**, worker-per-connection coroutines.
-- Route registration with `requireAuth`: `router.get("/api/v1/...") {
-  requireAuth(it) { req -> handler(req) } }`.
-- Handlers return `HttpResponse`; JSON via `jsonResponse(...)`, binary via
-  `HttpResponse.binaryBody` (already used for camera/mic/video files).
-- Permissions requested/checked via `permissions/PermissionManager.kt`.
+### 1.4 Deletes + battery
 
-## 3. What to build (the helpers)
+- `POST /api/v1/sms/delete` + `/logs/calls/delete` by provider row id
+  (`SmsProvider.deleteSms`, `CallLogsProvider.deleteCallLog`,
+  permission-gated). Manifest: `WRITE_SMS`, `WRITE_CALL_LOG`.
+- Call-log delete WORKS on M51 (`pm grant` WRITE_CALL_LOG succeeds on
+  Samsung). SMS delete is silently no-op'd unless Artemis is the default
+  SMS app (Android restriction) — API returns a clear message; phone
+  dashboard has SET DEFAULT SMS / SET DEFAULT DIALER buttons.
+- `feature/BatteryHelper.kt` → `GET /api/v1/battery` (levelPercent,
+  isCharging, chargeSource, status, health, temperatureC, voltageMv,
+  technology). NOTE: data class is `BatterySnapshot` (BatteryInfo name
+  collides with `DeviceInfoProvider`'s).
 
-### 3.1 Helper pattern (house style)
+### 1.5 Other helpers shipped (previous handoff items)
 
-Create/refactor a `helper/` layer (or keep in `feature/` — your call, but
-be consistent) where each helper:
+- `CameraFeedController` (`/camera/feed/start|stop|latest`),
+  `FileSystemHelper` (`/files/list|download|upload`, app-scoped root,
+  traversal 403, external roots gated by MANAGE_EXTERNAL_STORAGE),
+  `ContactsProvider` (`/contacts`), location `?fresh=1`.
+- Version: code 6 / `2.3.0`; `startForeground` mask = exactly
+  `mediaProjection` on API 34+; `LifecycleService` so CameraX
+  `bindToLifecycle` runs on the FGS lifecycle (main thread).
 
-1. Is a plain Kotlin class/object taking `Context` (application or
-   service context — NEVER an Activity reference; it must run with the app
-   closed).
-2. Exposes suspend or blocking methods returning plain data (or a file
-   path) — no HTTP knowledge inside the helper.
-3. Has its endpoints wired in `SimpleHttpServer` via `requireAuth`, with
-   `jsonResponse`/binary responses.
-4. Handles its own permission state (return a clear
-   `{"error":"permission_denied","permission":"..."}` instead of crashing).
+## 2. NEXT phase — candidates (pick what fits)
 
-### 3.2 Required helpers (user-named)
+1. **Front-cam feed smoothness**: camera stream is 0.5–0.7 fps because
+   each frame is a fresh CameraX ImageCapture (~1.5 s on M51). Build a
+   repeating front-cam feed (mirror `CameraFeedController` or make it
+   lens-aware) or switch the stream handler to the feed's latest-frame
+   cache. Also consider downscaling frames before the JPEG encode.
+2. **SMS delete UX**: set-as-default flow works, but the web dashboard
+   could surface the default-SMS status (check
+   `Telephony.Sms.getDefaultSmsPackage` in a `/sms/status`-style
+   endpoint) instead of the generic failure message.
+3. **Stream auth hardening** (if the threat model demands it): streams
+   are behind `requireAuth` like everything else, but they are
+   long-lived connections — verify token rotation mid-stream behaves
+   (it does not kick streams today; document or enforce).
+4. **Screen recording** (file output) via the same accessibility
+   backend — today it's capture-only (screenshots + stream); a
+   recording loop would reuse the accessibility `takeScreenshot` path
+   into a MediaMuxer/MP4 writer.
+5. Anything from the original helper backlog not yet wired into the
+   dashboard UI (files browser panel, contacts panel).
 
-1. **Location helper** — exists (`LocationTracker` + current/history
-   endpoints). Extend: verify it returns a fix even after the app was
-   never opened post-reboot (FGS-only path); consider a `/location/stream`
-   or higher-frequency poll variant for the dashboard map. Low priority —
-   mostly verification + polish.
+## 3. Hard rules (unchanged)
 
-2. **Camera feed helper** — exists as single-shot capture. Build the
-   **feed**: a repeating capture (e.g. `POST /api/v1/camera/feed/start`
-   with interval + duration, `.../feed/stop`) returning the latest frame
-   via `GET /api/v1/camera/feed/latest` (binary JPEG) so the dashboard can
-   render a live-ish view. Reuse `CameraController`'s mutex discipline
-   (camera is exclusive — photo vs video vs feed must serialize).
-
-3. **Screen helper** — NOT built (flagged leftover from v2.0.0).
-   Screenshots / screen recording need `MediaProjection`, and Android 10+
-   REQUIRES a per-session user consent dialog. Decide and document the UX:
-   a one-time consent on the phone (from a foreground Activity —
-   `MainActivity`/`DashboardScreen` trigger) that caches the
-   `MediaProjection` token, then the helper captures on demand. If the
-   consent wrinkle is unacceptable, document why and propose the
-   AccessibilityService alternative — but do NOT silently skip.
-
-4. **Files/assets helper** — NOT built. New endpoints:
-   - `GET /api/v1/files/list?path=<abs>` — directory listing (name, size,
-     mtime, isDir).
-   - `GET /api/v1/files/download?path=<abs>` — file bytes (binary body).
-   - `POST /api/v1/files/upload?path=<abs>` — write bytes (from dashboard
-     push; needs a body-parsing path in the server — check how `POST`
-     bodies are handled today and mirror it).
-   - Whitelist/restrict the root to app-accessible storage (filesDir +
-     public dirs) unless the user asks for full-root.
-
-5. **"Etc." candidates** (pick what fits): contacts
-   (`ContactsContract`, `READ_CONTACTS`), calendar, clipboard
-   (`ClipboardManager`), active app / foreground-app info, camera
-   front/back switch already supported, ambient light / sensors. Wire the
-   ones the dashboard already has buttons for first.
-
-### 3.3 Dashboard side (only if time permits)
-
-`dashboard_web/` per-device page gains buttons/panels for the new
-endpoints, following the existing camera/call-logs panel pattern
-(`device_client.py` calls → `templates/` render). The phone side is the
-priority; dashboard wiring is secondary.
-
-## 4. Hard rules
-
-- **FROZEN sector** (from `docs/AGENTS.md` §3.1): `AuthManager.kt`,
-  `TlsManager.kt`, and the security enforcement inside
-  `SimpleHttpServer.kt` — token/pin verification, pairing, lockout, rate
-  limiting, constant-time compares. ADD new endpoints; never modify
-  existing auth logic. Same for `device_client.py` / `artemis.py` auth
-  paths. If a fix seems to require touching them, STOP and report.
-- **Pairing UX frozen**: open app → 6-digit code → enter once → paired
-  forever. No re-pair on upgrade.
-- **Helpers must run FGS-only**: the server must answer these endpoints
-  with the app swiped away / never opened after reboot — that is the
-  acceptance test.
-- No Activity references in helpers; no `androidx.compose` imports in the
+- FROZEN sector (`docs/AGENTS.md` §3.1): `AuthManager.kt`, `TlsManager.kt`,
+  security enforcement in `SimpleHttpServer.kt`, auth paths in
+  `device_client.py` / `artemis.py`. ADD endpoints; never modify auth logic.
+- Helpers run FGS-only: endpoints must answer with the app swiped away /
+  never opened after reboot (acceptance test).
+- No Activity references in helpers; no `androidx.compose` in
   helper/server layer.
+- `HttpURLConnection` on the phone REQUIRES `\r\n` line endings.
 
-## 5. Verification checklist
+## 4. Delivery record
 
-1. `assembleDebug` clean; version bump in `app/build.gradle.kts` +
-   `docs/SECURITY.md` header (tag = versionName = versionCode).
-2. `adb install -r` (pairing + whitelist survive) on the M51.
-3. Live tests with the phone **unlocked + app foregrounded first** (M51
-   freezer), then repeat with the app **swiped away / not opened**:
-   - `curl -k https://100.91.166.21:8443/api/v1/health` → 200.
-   - Each new endpoint returns 200 with correct JSON/binary; wrong/missing
-     token returns 401 (`requireAuth` working).
-   - Screen-off 30+ min → `/health` still answers (Doze-exit re-arm).
-   - Reboot → server auto-starts (BootReceiver) → helpers answer without
-     opening the app.
-4. Register captured files as media rows on the dashboard via
-   `POST /api/device/{host}/{port}/media` so they appear in the catalogue.
-
-## 6. Delivery
-
-- Commit + push to GitHub (`master`), message `v2.3.0:...` (helpers:
-  camera feed, screen, files/assets, etc. — name what shipped), tag
-  `v2.3.0`, work tree clean.
-- Update this file: move done items to a DONE section, write the next
-  phase brief.
-- Update `docs/AGENTS.md` §2.2 feature table + §2.3/§2.4 as needed.
+- Commit + push `master`, message `v2.3.0:...`, tag `v2.3.0`, clean tree.
+- `docs/AGENTS.md` §2.2/§2.6 updated; `docs/SECURITY.md` header bumped.

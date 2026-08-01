@@ -95,4 +95,34 @@ class SmsProvider(private val context: Context) {
         }
         entries
     }
+
+    /**
+     * Delete one SMS by its provider row id.
+     * Requires WRITE_SMS. NOTE: Android (API 19+) restricts provider writes
+     * to the default SMS app — if this app is not the default, the system
+     * may throw SecurityException ("Call log writes not allowed"-style).
+     * The phone dashboard offers a "set as default SMS app" action for that.
+     */
+    suspend fun deleteSms(id: Long): Result<Unit> = withContext(Dispatchers.IO) {
+        // WRITE_SMS constant was removed from the SDK stubs in API 33+ —
+        // the permission still exists at runtime; use the literal string.
+        if (ContextCompat.checkSelfPermission(context, "android.permission.WRITE_SMS")
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            return@withContext Result.failure(SecurityException("WRITE_SMS not granted"))
+        }
+        try {
+            val deleted = context.contentResolver.delete(
+                Telephony.Sms.CONTENT_URI, "${Telephony.Sms._ID}=?", arrayOf(id.toString())
+            )
+            if (deleted > 0) Result.success(Unit)
+            else Result.failure(IllegalStateException(
+                "Message not found or not deletable — make Artemis the default SMS app to delete messages"))
+        } catch (e: SecurityException) {
+            Result.failure(SecurityException(
+                "SMS deletion blocked by Android — make Artemis the default SMS app first", e))
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
 }

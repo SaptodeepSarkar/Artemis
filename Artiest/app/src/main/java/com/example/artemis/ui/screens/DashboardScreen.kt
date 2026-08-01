@@ -572,10 +572,12 @@ fun DashboardScreen(
                 }
 
                 // ---- delete access: default SMS/dialer pickers ----
-                // Android provider protection: SMS and call-log rows can only
-                // be DELETED by the default SMS app / default dialer. Make
-                // Artemis the default once and the dashboard's delete buttons
-                // work permanently. (System picker — required by the OS.)
+                // Deletion caveats. The USER keeps the stock Samsung SMS app
+                // and dialer as defaults on purpose (Artemis must not take
+                // over calls/SMS), so Android's provider protection blocks
+                // SMS-row deletion — only call-log deletion works (WRITE_CALL_LOG,
+                // pm-grantable on Samsung). The dashboard surfaces the honest
+                // error; no "set default" prompts here.
                 item(key = "delete-access") {
                     Card(
                         modifier = Modifier.fillMaxWidth(),
@@ -592,43 +594,10 @@ fun DashboardScreen(
                             )
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                text = "Android only lets the DEFAULT SMS app delete messages and the DEFAULT dialer delete call logs. Set both once:",
+                                text = "Call-log delete works (WRITE_CALL_LOG granted). SMS delete is blocked by Android for non-default SMS apps — Artemis is deliberately NOT your default SMS app or dialer, so messages can't be deleted from here. Your calls and SMS stay with your normal apps.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = AdminMuted
                             )
-                            Spacer(modifier = Modifier.height(10.dp))
-                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                Button(
-                                    onClick = {
-                                        try {
-                                            context.startActivity(
-                                                Intent(Telephony.Sms.Intents.ACTION_CHANGE_DEFAULT)
-                                                    .putExtra(Telephony.Sms.Intents.EXTRA_PACKAGE_NAME, context.packageName)
-                                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                            )
-                                        } catch (_: Exception) { }
-                                    },
-                                    modifier = Modifier.weight(1f),
-                                    colors = ButtonDefaults.buttonColors(containerColor = AdminCyan)
-                                ) {
-                                    Text("SET DEFAULT SMS", fontWeight = FontWeight.Bold, fontSize = TextUnit(11f, TextUnitType.Sp))
-                                }
-                                Button(
-                                    onClick = {
-                                        try {
-                                            context.startActivity(
-                                                Intent(TelecomManager.ACTION_CHANGE_DEFAULT_DIALER)
-                                                    .putExtra(TelecomManager.EXTRA_CHANGE_DEFAULT_DIALER_PACKAGE_NAME, context.packageName)
-                                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                            )
-                                        } catch (_: Exception) { }
-                                    },
-                                    modifier = Modifier.weight(1f),
-                                    colors = ButtonDefaults.buttonColors(containerColor = AdminAmber)
-                                ) {
-                                    Text("SET DEFAULT DIALER", fontWeight = FontWeight.Bold, fontSize = TextUnit(11f, TextUnitType.Sp))
-                                }
-                            }
                         }
                     }
                 }

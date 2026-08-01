@@ -416,32 +416,70 @@ async function loadBattery() {
     }
 }
 
+// ---- LIVE VIEW over WebSocket (v2.3.1) ----
+// One wss connection carries screen/back/front JPEG + PCM mic; frames are
+// drawn to canvases (no <img> MJPEG buffering) for smooth playback.
+// Binary frame: [1B channel][4B BE length][payload]
+//   ch 1 = screen JPEG, 2 = back-cam JPEG, 3 = front-cam JPEG, 4 = PCM16
+// Controls: {"cmd":"source","v":"screen"|"cam"} / {"cmd":"camera","v":"front"|"back"}
+//           {"cmd":"pip","v":"on"|"off"} / {"cmd":"audio","v":"on"|"off"}
 let liveOn = false;
 let liveSource = "screen";
-let pipOn = false;
-let micAudioOn = false;
+let liveLens = "back";
+let pipOn = true;
+let micAudioOn = true;
+let liveWs = null;
 
 function setLiveBtn(enabled) {
-    ["liveSourceBtn", "pipBtn", "micAudioBtn"].forEach(id => {
+    ["liveSourceBtn", "liveFlipBtn", "pipBtn", "micAudioBtn"].forEach(id => {
         const b = document.getElementById(id);
         if (!b) return;
         b.disabled = !enabled;
         b.classList.toggle("opacity-40", !enabled);
         b.classList.toggle("cursor-not-allowed", !enabled);
     });
+    updateFlipLabel();
+}
+
+function updateFlipLabel() {
+    const b = document.getElementById("liveFlipBtn");
+    if (b) b.innerHTML = `<span class="material-symbols-outlined text-sm">flip_camera_android</span> FLIP: ${liveLens.toUpperCase()}`;
+}
+
+function sendWs(obj) {
+    if (liveWs && liveWs.readyState === WebSocket.OPEN) {
+        liveWs.send(JSON.stringify(obj));
+    }
+}
+
+function drawToCanvas(canvasId, blob) {
+    createImageBitmap(blob).then(bmp => {
+        const c = document.getElementById(canvasId);
+        if (!c) { bmp.close(); return; }
+        if (c.width !== bmp.width || c.height !== bmp.height) {
+            c.width = bmp.width;
+            c.height = bmp.height;
+        }
+        c.getContext("2d").drawImage(bmp, 0, 0);
+        bmp.close();
+    }).catch(() => {});
+}
+
+function liveStatusHtml() {
+    return `<span>LIVE · ${liveSource.toUpperCase()}${liveSource === "cam" ? " · " + liveLens.toUpperCase() : ""}</span>`;
 }
 
 async function toggleLiveView() {
     liveOn = !liveOn;
-    const main = document.getElementById("liveMain");
     const btn = document.getElementById("liveBtn");
     const status = document.getElementById("liveStatus");
+    const main = document.getElementById("liveMain");
     const place = document.getElementById("livePlaceholder");
-    const { host, port } = getHostPort();
 
     if (liveOn) {
         // Screen feed needs the accessibility capture backend enabled.
         if (liveSource === "screen") {
+            const { host, port } = getHostPort();
             const st = await api(`/api/device/${host}/${port}/screen/status`);
             if (!st || !st.enabled) {
                 liveOn = false;
@@ -449,21 +487,71 @@ async function toggleLiveView() {
                 return;
             }
         }
-        main.src = liveSource === "screen"
-            ? `/api/device/${host}/${port}/stream/screen?quality=70`
-            : `/api/device/${host}/${port}/stream/camera?camera=back&quality=55`;
-        main.style.display = "block";
-        if (place) place.style.display = "none";
-        btn.innerHTML = '<span class="material-symbols-outlined text-lg">stop</span> STOP LIVE VIEW';
-        btn.classList.remove("bg-hunt-crimson/10", "border-hunt-crimson/50", "text-hunt-crimson");
-        btn.classList.add("bg-hunt-crimson", "text-white", "border-hunt-crimson");
-        if (status) status.innerHTML = `<span>LIVE · ${liveSource.toUpperCase()}</span>`;
-        setLiveBtn(true);
-        // Full video-call default: front-cam PiP + audio on (both toggleable).
-        if (!pipOn) togglePip();
-        if (!micAudioOn) toggleMicAudio();
+        const { host, port } = getHostPort();
+        const proto = location.protocol === "https:" ? "wss" : "ws";
+        liveWs = new WebSocket(`${proto}://${location.host}/api/device/${host}/${port}/ws/live`);
+        liveWs.binaryType = "arraybuffer";
+        liveWs.onopen = () => {
+            main.style.display = "block";
+            if (place) place.style.display = "none";
+            if (pipOn) {
+                const wrap = document.getElementById("livePipWrap");
+                if (wrap) wrap.style.display = "block";
+            }
+            btn.innerHTML = '<span class="material-symbols-outlined text-lg">stop</span> STOP LIVE VIEW';
+            btn.classList.remove("bg-hunt-crimson/10", "border-hunt-crimson/50", "text-hunt-crimson");
+            btn.classList.add("bg-hunt-crimson", "text-white", "border-hunt-crimson");
+            if (status) status.innerHTML = liveStatusHtml();
+            setLiveBtn(true);
+            // Full video-call default: audio on (toggleable).
+            if (micAudioOn) startMicAudio();
+            sendWs({ cmd: "source", v: liveSource });
+            sendWs({ cmd: "camera", v: liveLens });
+            sendWs({ cmd: "pip", v: pipOn ? "on" : "off" });
+            sendWs({ cmd: "audio", v: micAudioOn ? "on" : "off" });
+        };
+        liveWs.onmessage = (ev) => {
+            const buf = ev.data;
+            if (!(buf instanceof ArrayBuffer) || buf.byteLength < 5) return;
+            const ch = new Uint8Array(buf, 0, 1)[0];
+            const len = new DataView(buf, 1, 4).getUint32(0, false);
+            if (5 + len > buf.byteLength) return;
+            const payload = buf.slice(5, 5 + len);
+            if (ch === 4) {
+                const samples = new Float32Array(payload.byteLength / 2);
+                const dv = new DataView(payload);
+                for (let i = 0; i < samples.length; i++) {
+                    samples[i] = dv.getInt16(i * 2, true) / 32768;
+                }
+                pushLiveAudio(samples);
+            } else if (ch >= 1 && ch <= 3) {
+                const blob = new Blob([payload], { type: "image/jpeg" });
+                if (ch === 1) {
+                    drawToCanvas("liveMain", blob);
+                } else if (liveSource === "cam") {
+                    const isMain = (ch === 2 && liveLens === "back") || (ch === 3 && liveLens === "front");
+                    if (isMain) drawToCanvas("liveMain", blob);
+                } else if (ch === 3 && pipOn) {
+                    drawToCanvas("livePip", blob);
+                }
+            }
+        };
+        liveWs.onclose = () => {
+            liveWs = null;
+            liveOn = false;
+            main.style.display = "none";
+            if (place) place.style.display = "flex";
+            btn.innerHTML = '<span class="material-symbols-outlined text-lg">play_arrow</span> START LIVE VIEW';
+            btn.classList.add("bg-hunt-crimson/10", "border-hunt-crimson/50", "text-hunt-crimson");
+            btn.classList.remove("bg-hunt-crimson", "text-white", "border-hunt-crimson");
+            if (status) status.innerHTML = "<span>NO_STREAM</span>";
+            setLiveBtn(false);
+            stopMicAudio();
+            hidePip();
+        };
+        liveWs.onerror = () => { try { liveWs.close(); } catch (e) {} };
     } else {
-        main.src = "";
+        if (liveWs) { try { liveWs.close(); } catch (e) {} liveWs = null; }
         main.style.display = "none";
         if (place) place.style.display = "flex";
         btn.innerHTML = '<span class="material-symbols-outlined text-lg">play_arrow</span> START LIVE VIEW';
@@ -471,50 +559,71 @@ async function toggleLiveView() {
         btn.classList.remove("bg-hunt-crimson", "text-white", "border-hunt-crimson");
         if (status) status.innerHTML = "<span>NO_STREAM</span>";
         setLiveBtn(false);
-        if (pipOn) togglePip();
-        if (micAudioOn) toggleMicAudio();
+        stopMicAudio();
+        hidePip();
     }
 }
 
 function toggleLiveSource() {
-    liveSource = liveSource === "screen" ? "camera" : "screen";
-    const main = document.getElementById("liveMain");
+    liveSource = liveSource === "screen" ? "cam" : "screen";
     const btn = document.getElementById("liveSourceBtn");
     const status = document.getElementById("liveStatus");
-    const { host, port } = getHostPort();
-    if (liveOn) {
-        main.src = liveSource === "screen"
-            ? `/api/device/${host}/${port}/stream/screen?quality=70`
-            : `/api/device/${host}/${port}/stream/camera?camera=back&quality=55`;
-        if (status) status.innerHTML = `<span>LIVE · ${liveSource.toUpperCase()}</span>`;
+    if (liveWs && liveWs.readyState === WebSocket.OPEN) {
+        sendWs({ cmd: "source", v: liveSource });
+        sendWs({ cmd: "camera", v: liveLens });
+        if (status) status.innerHTML = liveStatusHtml();
     }
     if (btn) btn.innerHTML = `<span class="material-symbols-outlined text-sm">${liveSource === "screen" ? "screen_share" : "photo_camera"}</span> ${liveSource.toUpperCase()}`;
+}
+
+function toggleFlip() {
+    if (liveSource !== "cam") return;
+    liveLens = liveLens === "back" ? "front" : "back";
+    sendWs({ cmd: "camera", v: liveLens });
+    updateFlipLabel();
+    const status = document.getElementById("liveStatus");
+    if (status) status.innerHTML = liveStatusHtml();
 }
 
 function togglePip() {
     pipOn = !pipOn;
     const wrap = document.getElementById("livePipWrap");
-    const pip = document.getElementById("livePip");
     const btn = document.getElementById("pipBtn");
-    const { host, port } = getHostPort();
     if (pipOn) {
-        pip.src = `/api/device/${host}/${port}/stream/camera?camera=front&quality=45`;
         if (wrap) wrap.style.display = "block";
         if (btn) btn.innerHTML = '<span class="material-symbols-outlined text-sm">front_camera</span> CAMERA PIP: ON';
+        if (liveWs && liveWs.readyState === WebSocket.OPEN) sendWs({ cmd: "pip", v: "on" });
     } else {
-        pip.src = "";
-        if (wrap) wrap.style.display = "none";
+        hidePip();
         if (btn) btn.innerHTML = '<span class="material-symbols-outlined text-sm">front_camera</span> CAMERA PIP: OFF';
+        if (liveWs && liveWs.readyState === WebSocket.OPEN) sendWs({ cmd: "pip", v: "off" });
     }
 }
 
-// ---- mic audio playback (PCM16 mono 44.1kHz) ----
+function hidePip() {
+    const wrap = document.getElementById("livePipWrap");
+    const pip = document.getElementById("livePip");
+    if (pip) { try { pip.getContext("2d").clearRect(0, 0, pip.width || 640, pip.height || 480); } catch (e) {} }
+    if (wrap) wrap.style.display = "none";
+}
+
+// ---- mic audio playback (PCM16 mono 44.1kHz) over WebSocket ----
 const AUDIO_RATE = 44100;
 const AUDIO_CHUNK = 4096;
 let liveAudioCtx = null;
 let liveAudioNode = null;
-let liveAudioAbort = null;
 const liveAudioQueue = [];
+
+function pushLiveAudio(samples) {
+    if (!liveAudioCtx || !liveAudioNode) return;
+    let total = 0;
+    for (const c of liveAudioQueue) total += c.length;
+    while (total + samples.length > AUDIO_RATE * 1.5 && liveAudioQueue.length) {
+        total -= liveAudioQueue[0].length;
+        liveAudioQueue.shift();
+    }
+    liveAudioQueue.push(samples);
+}
 
 function startMicAudio() {
     if (liveAudioCtx) return;
@@ -536,36 +645,9 @@ function startMicAudio() {
     };
     sp.connect(liveAudioCtx.destination);
     liveAudioNode = sp;
-
-    const { host, port } = getHostPort();
-    liveAudioAbort = new AbortController();
-    fetch(`/api/device/${host}/${port}/stream/mic`, { signal: liveAudioAbort.signal })
-        .then(async (res) => {
-            if (!res.ok || !res.body) throw new Error(`mic stream ${res.status}`);
-            const reader = res.body.getReader();
-            const pump = () => reader.read().then(({ done, value }) => {
-                if (done) return;
-                const samples = new Float32Array(Math.floor(value.length / 2));
-                for (let i = 0, j = 0; i + 1 < value.length; i += 2, j++) {
-                    const s = (value[i + 1] << 8) | value[i];
-                    samples[j] = s >= 32768 ? (s - 65536) / 32768 : s / 32768;
-                }
-                let total = 0;
-                for (const c of liveAudioQueue) total += c.length;
-                while (total + samples.length > AUDIO_RATE * 1.5 && liveAudioQueue.length) {
-                    total -= liveAudioQueue[0].length;
-                    liveAudioQueue.shift();
-                }
-                liveAudioQueue.push(samples);
-                pump();
-            }).catch(() => {});
-            pump();
-        })
-        .catch(() => {});
 }
 
 function stopMicAudio() {
-    if (liveAudioAbort) { try { liveAudioAbort.abort(); } catch (e) {} liveAudioAbort = null; }
     if (liveAudioNode) { try { liveAudioNode.disconnect(); } catch (e) {} liveAudioNode = null; }
     if (liveAudioCtx) { try { liveAudioCtx.close(); } catch (e) {} liveAudioCtx = null; }
     liveAudioQueue.length = 0;
@@ -580,20 +662,28 @@ function toggleMicAudio() {
             btn.innerHTML = '<span class="material-symbols-outlined text-sm">volume_up</span> AUDIO: ON';
             btn.classList.add("bg-maquis-green/10", "border-maquis-green/50", "text-maquis-green");
         }
+        sendWs({ cmd: "audio", v: "on" });
     } else {
         stopMicAudio();
         if (btn) {
             btn.innerHTML = '<span class="material-symbols-outlined text-sm">volume_off</span> AUDIO: OFF';
             btn.classList.remove("bg-maquis-green/10", "border-maquis-green/50", "text-maquis-green");
         }
+        sendWs({ cmd: "audio", v: "off" });
     }
 }
 
-// Kill all streams when leaving the page (stops phone-side capture loops).
+// Keep the AUDIO button label in sync with the state.
+(function initLiveUi() {
+    const btn = document.getElementById("micAudioBtn");
+    if (btn && micAudioOn) {
+        btn.innerHTML = '<span class="material-symbols-outlined text-sm">volume_up</span> AUDIO: ON';
+        btn.classList.add("bg-maquis-green/10", "border-maquis-green/50", "text-maquis-green");
+    }
+})();
+
+// Kill the WebSocket when leaving the page (stops phone-side capture loops).
 window.addEventListener("beforeunload", () => {
+    if (liveWs) { try { liveWs.close(); } catch (e) {} }
     stopMicAudio();
-    const main = document.getElementById("liveMain");
-    const pip = document.getElementById("livePip");
-    if (main) main.src = "";
-    if (pip) pip.src = "";
 });

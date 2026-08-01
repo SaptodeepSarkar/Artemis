@@ -1,6 +1,6 @@
 # Artemis Sentinel — AGENTS.md
 
-> Current: **v2.3.0** (2026-08-01). Read this first, then `docs/SECURITY.md`
+> Current: **v2.3.1** (2026-08-01). Read this first, then `docs/SECURITY.md`
 > (threat model), then `docs/handoff.md` (the current phase brief for the
 > next agent). This file is the durable project reference; the phase brief
 > lives in `handoff.md`.
@@ -22,7 +22,7 @@ The phone server is the heart: every capability (location, camera, mic,
 call logs, SMS, video, admin lock) is an authenticated HTTP endpoint on
 `:8443` behind the TLS + TOFU-pin client stack.
 
-## 2. Current state (v2.3.0 — shipped, live-verified)
+## 2. Current state (v2.3.1 — shipped, live-verified)
 
 ### 2.1 The security backbone (DONE, FROZEN — do not touch)
 
@@ -58,11 +58,12 @@ call logs, SMS, video, admin lock) is an authenticated HTTP endpoint on
 | `/api/v1/admin/lock` (device-admin lockNow) | ✓ |
 | `/api/v1/battery` (BatteryHelper — dashboard header) | ✓ |
 | `/api/v1/screen/status`, `/screen/capture` (accessibility-first) | ✓ |
-| `/api/v1/stream/screen`, `/stream/camera`, `/stream/mic` (MJPEG/PCM live) | ✓ |
+| `/api/v1/stream/screen`, `/stream/camera`, `/stream/mic` (MJPEG/PCM live) | ✓ legacy — LIVE VIEW now uses WS (2.7) |
 | `/api/v1/files/list`, `/download`, `/upload` (app-scoped root) | ✓ |
 | `/api/v1/contacts` (READ_CONTACTS) | ✓ |
-| Camera feed: `/api/v1/camera/feed/start`, `/stop`, `/latest` | ✓ |
+| `/api/v1/camera/feed/start`, `/stop`, `/latest` | ✓ |
 | Screen recording / screenshots | ✓ accessibility `takeScreenshot` (API 30+), ZERO consent dialogs; MediaProjection kept only as documented fallback |
+| `/api/v1/ws/live` (RFC 6455 WebSocket, LIVE VIEW) | ✓ v2.3.1 — see 2.7 |
 
 ### 2.3 24/7 persistence (v2.2.0 — live-verified)
 
@@ -118,25 +119,27 @@ favicon (`/static/favicon.svg`, hardcoded path — `url_for('static')` raises
   (or the phone dashboard's ENABLE button) — survives `install -r` and
   reboot. MediaProjection (`ScreenCaptureService` FGS) remains only as a
   documented fallback (`/screen/status` returns `method`).
-- **Live streams (MJPEG/PCM)**: `GET /api/v1/stream/screen` and
-  `/stream/camera?camera=front|back` are `multipart/x-mixed-replace`
-  MJPEG streams (per-frame `--frame` boundaries, `Connection: close`,
-  no Content-Length); `/stream/mic` is raw PCM16 mono 44.1kHz. The
-  browser renders MJPEG natively in an `<img>`. Screen ~2.5 fps;
-  camera ~0.5–0.7 fps (CameraX single-capture latency on M51 — known
-  limit; a preview-stream feed is the future optimization).
+- **Live streams (MJPEG/PCM — LEGACY since v2.3.1)**: `GET
+  /api/v1/stream/screen` and `/stream/camera?camera=front|back` are
+  `multipart/x-mixed-replace` MJPEG streams (per-frame `--frame`
+  boundaries, `Connection: close`, no Content-Length); `/stream/mic` is
+  raw PCM16 mono 44.1kHz. The browser rendered MJPEG natively in an
+  `<img>` — screen ~2.5 fps; camera ~0.5–0.7 fps (CameraX single-capture
+  latency on M51), with browser-side rendering artefacts (green/grey
+  static on big frames). **LIVE VIEW replaced this with the WebSocket
+  pipeline (2.7); the MJPEG endpoints remain for scripted/curl use.**
 - **Dashboard LIVE VIEW panel** replaces the old capture button: main
   feed (screen ⇄ back cam toggle), front-camera PiP top-right (toggle),
   mic audio via WebAudio (toggle). All three stop cleanly on STOP or
-  page unload (`beforeunload` clears img src + aborts the fetch, which
-  ends the phone-side loops).
+  page unload (`beforeunload` closes the WebSocket, which ends the
+  phone-side loops).
 - **Deletes**: `POST /api/v1/sms/delete` + `/logs/calls/delete` by
   provider row id. Call-log delete WORKS on the M51 (`WRITE_CALL_LOG`
   grantable via `pm grant` on Samsung). SMS delete is silently no-op'd
-  by Android unless Artemis is the default SMS app — the phone dashboard
-  has SET DEFAULT SMS / SET DEFAULT DIALER buttons
-  (`Telephony.Sms.getDefaultSmsPackage` / `TelecomManager` pickers) and
-  the API returns a clear message instead of a crash.
+  by Android unless Artemis is the default SMS app — **Artemis must NOT
+  become the default SMS app or default dialer (user requirement; the
+  stock Samsung apps keep those roles)**, so the API returns a clear
+  message instead of a crash and the dashboard copy states the caveat.
 - **BatteryHelper**: `GET /api/v1/battery` → levelPercent, isCharging,
   chargeSource, status, health, temperatureC, voltageMv, technology.
   Dashboard status card shows `54% · none · 32.7°C · 3.82V`.
@@ -144,6 +147,51 @@ favicon (`/static/favicon.svg`, hardcoded path — `url_for('static')` raises
   + `sendStreamHead()` for chunked/streamed bodies; stream handlers run
   on the worker coroutine and close the socket on end (and on client
   disconnect).
+
+### 2.7 v2.3.1 — LIVE VIEW WebSocket pipeline, flip, no-default-app
+
+- **One RFC 6455 WebSocket replaces MJPEG for LIVE VIEW**:
+  `GET /api/v1/ws/live` (token-auth via `wsLiveAuth`, same Bearer trust
+  as every other route) upgrades the raw socket; framing lives in
+  `server/LiveWebSocket.kt` (hand-rolled, NO new Android deps:
+  `acceptKey` = Base64(SHA1(key+MAGIC)), unmasked server→client frames,
+  masked client→server reads, control frames ping/pong/close, text for
+  controls, binary for media).
+- **Frame protocol (binary, one frame per media chunk)**:
+  `[1B channel][4B big-endian length][JPEG | PCM16]`. Channels:
+  `1`=screen JPEG, `2`=back-cam JPEG, `3`=front-cam JPEG (PiP),
+  `4`=PCM16 mic (mono 44.1kHz, ~4KB chunks). Client controls are JSON
+  text: `{"cmd":"source","v":"screen|cam"}`, `{"cmd":"camera","v":
+  "back|front"}`, `{"cmd":"pip","v":"on|off"}`, `{"cmd":"audio","v":
+  "on|off"}`.
+- **THE v2.3.1 BUG FIX (root cause of the reported static/lag)**: the
+  original `encodeFrame` implemented only the 16-bit extended length
+  (opcode 126) — full-res screen JPEGs routinely exceed 64 KiB, so the
+  length silently wrapped, desyncing the client (websockets lib → 1002
+  "invalid opcode", browser canvas → dropped stream / garbled frames).
+  **`encodeFrame` now emits the 64-bit extended length (127) for
+  payloads > 64 KiB.** Cam-mode frames stayed under 64 KiB, which is why
+  only screen mode broke. Verified with a raw-socket frame validator and
+  the full browser flow (screen → cam → flip → stop, connection held).
+- **Performance**: back cam ≈7.5–8 fps via the persistent 640x480
+  `ImageAnalysis` preview binding in `CameraController.kt` (replaces the
+  0.5 fps per-frame bind→capture→unbind; photo/frame captures still stop
+  the preview first — camera exclusivity). Screen ≈3 fps (accessibility
+  `takeScreenshot` latency — inherent). Audio flows continuously.
+- **Flip**: dashboard FLIP button toggles `{cmd:"camera"}` back⇄front
+  live; `LiveState.camLens` drives both the main feed and the PiP.
+- **Dashboard side**: `dashboard_web/server/__init__.py` proxies the
+  phone WS (`@app.websocket` → `websockets.connect` with the existing
+  cert-pin trust model); `static/js/dashboard.js` parses the binary
+  channels, draws to `<canvas>` (`liveMain`/`livePip`), plays audio via
+  WebAudio, and holds all state in `liveOn/liveSource/liveLens` +
+  `sendWs({cmd})` controls. Cache-busted reloads (`?x=N`) are required
+  after JS edits — the browser caches `dashboard.js` aggressively.
+- **No default-app dependency (user mandate)**: the SET DEFAULT
+  SMS/dialer card is REMOVED from `DashboardScreen.kt`; Artemis never
+  takes over calls/SMS — the user's stock Samsung apps keep the default
+  roles. SMS-delete remains Android-blocked (provider protection,
+  `WRITE_SMS` not grantable) and the UI copy states that caveat.
 
 ## 3. Architecture and conventions
 

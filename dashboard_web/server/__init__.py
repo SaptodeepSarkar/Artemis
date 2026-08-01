@@ -2,8 +2,9 @@
 import socket
 import time
 import json
+import asyncio
 from pathlib import Path
-from fastapi import FastAPI, Request, HTTPException, Response, Depends
+from fastapi import FastAPI, Request, HTTPException, Response, Depends, WebSocket
 from fastapi.responses import (
     HTMLResponse, JSONResponse, RedirectResponse, FileResponse, StreamingResponse,
 )
@@ -17,7 +18,7 @@ from .device_client import (
     health, pair, device_info, location_current, camera_list, camera_capture,
     camera_capture_file, call_logs, sms, callrecorder_status,
     callrecorder_toggle, call_recordings, video_record, video_list, video_file,
-    battery, sms_delete, calllog_delete, screen_status, stream,
+    battery, sms_delete, calllog_delete, screen_status, stream, ws_live,
 )
 from .device_manager import registry
 
@@ -403,6 +404,59 @@ async def device_mic_stream(host: str, port: int, _=Depends(require_login)):
         gen(), media_type="application/octet-stream",
         headers={"Cache-Control": "no-store", "X-Audio-Format": "pcm16-mono-44100"},
     )
+
+
+@app.websocket("/api/device/{host}/{port}/ws/live")
+async def device_ws_live(ws: WebSocket, host: str, port: int):
+    """Bridge the browser's LIVE VIEW WebSocket to the phone's wss endpoint.
+
+    The browser never sees the phone token or its TLS cert — this route
+    resolves the paired device (refreshing the access token), connects to
+    the phone with TOFU pinning, and relays binary frames (screen/back/front
+    JPEG, PCM mic) and JSON text controls in both directions.
+    """
+    await ws.accept()
+    key = f"{host}:{port}"
+    dev, err = _paired_device_or_error(key)
+    if err or dev is None:
+        await ws.close(code=4401, reason=json.dumps(err or {"error": "not_found"}))
+        return
+    try:
+        phone = await ws_live(dev.host, dev.token or "", dev.port, dev.cert_fp or None)
+    except Exception as e:
+        await ws.close(code=4404, reason=str(e))
+        return
+
+    async def phone_to_browser():
+        try:
+            async for msg in phone:
+                if isinstance(msg, (bytes, bytearray)):
+                    await ws.send_bytes(bytes(msg))
+                elif isinstance(msg, str):
+                    await ws.send_text(msg)
+        except Exception:
+            pass
+
+    async def browser_to_phone():
+        try:
+            while True:
+                raw = await ws.receive()
+                if raw.get("type") == "websocket.disconnect":
+                    break
+                data = raw.get("text")
+                if data is not None:
+                    await phone.send(data)
+        except Exception:
+            pass
+
+    try:
+        await asyncio.gather(phone_to_browser(), browser_to_phone())
+    finally:
+        try:
+            await phone.close()
+        except Exception:
+            pass
+
 
 @app.post("/api/device/{host}/{port}/camera/capture/pull")
 async def device_camera_capture_pull(host: str, port: int, camera_id: str = "back",

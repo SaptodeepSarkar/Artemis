@@ -26,6 +26,8 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.OutputStream
@@ -64,7 +66,14 @@ data class HttpResponse(
      * block with the raw socket OutputStream until it returns or the client
      * disconnects. Used for MJPEG screen/camera feeds and raw PCM mic.
      */
-    val streamBody: (suspend (OutputStream) -> Unit)? = null
+    val streamBody: (suspend (OutputStream) -> Unit)? = null,
+    /**
+     * WebSocket session (v2.3.1 LIVE VIEW): when set, the server skips the
+     * normal response write and hands the raw socket to this handler,
+     * which performs the RFC 6455 upgrade and then runs the frame loops.
+     * Auth must already have been validated by the route (query token).
+     */
+    val wsHandler: (suspend (java.net.Socket) -> Unit)? = null
 )
 
 data class Route(
@@ -268,6 +277,16 @@ class SimpleHttpServer(
         router.get("/api/v1/stream/screen") { requireAuth(it) { req -> screenStreamHandler(req) } }
         router.get("/api/v1/stream/camera") { requireAuth(it) { req -> cameraStreamHandler(req) } }
         router.get("/api/v1/stream/mic") { requireAuth(it) { req -> micStreamHandler(req) } }
+        // Live view over WebSocket (v2.3.1): screen/camera JPEG + PCM mic on
+        // one TLS connection, client control via small text frames. The
+        // browser cannot set Authorization headers on a WebSocket, so the
+        // token travels in the query string (the dashboard proxy injects it
+        // server-side — the browser never sees it).
+        router.get("/api/v1/ws/live") { req ->
+            wsLiveAuth(req) { r ->
+                HttpResponse(200, wsHandler = { socket -> handleLiveWs(socket, r) })
+            }
+        }
 
         // Call logs (READ_CALL_LOG)
         router.get("/api/v1/logs/calls") { requireAuth(it) { req -> callLogsHandler(req) } }
@@ -334,6 +353,22 @@ class SimpleHttpServer(
     }
 
     /**
+     * WebSocket auth (v2.3.1): browsers cannot set the Authorization header
+     * on a WebSocket, so the live-view token rides in the query string.
+     * Validation is the SAME frozen AuthManager path as [requireAuth] —
+     * only the token source differs (query param instead of header).
+     */
+    private fun wsLiveAuth(req: HttpRequest, handler: (HttpRequest) -> HttpResponse): HttpResponse {
+        val tokenStr = req.queryParams["token"]
+            ?: return jsonResponse(401, mapOf("error" to "unauthorized", "message" to "Missing authentication token"))
+        val result = runBlocking { authManager.validateToken(tokenStr) }
+        if (result.isFailure) {
+            return jsonResponse(401, mapOf("error" to "unauthorized", "message" to "Invalid authentication token"))
+        }
+        return handler(req)
+    }
+
+    /**
      * Client-management endpoints: authenticated dashboards pass a token; the
      * phone itself (loopback) is trusted without one — the same trust model
      * as pairing-code regeneration. Code running on the device already has
@@ -353,7 +388,7 @@ class SimpleHttpServer(
     private fun healthHandler(req: HttpRequest): HttpResponse {
         return jsonResponse(200, mapOf(
             "status" to "ok",
-            "version" to "2.3.0",
+            "version" to "2.3.1",
             "deviceName" to android.os.Build.MODEL,
             "uptimeSeconds" to ((System.currentTimeMillis() - startTime) / 1000),
             "activeConnections" to activeConnections,
@@ -1140,6 +1175,196 @@ class SimpleHttpServer(
         )
     }
 
+    // ============================================================
+    // Live view over WebSocket (v2.3.1)
+    //
+    // One TLS connection carrying everything the dashboard LIVE VIEW
+    // needs: screen JPEG (ch 0x01), back-cam JPEG (0x02), front-cam JPEG
+    // (0x03), PCM16 mic (0x04). Every binary frame is:
+    //   [1 byte channel][4 byte big-endian length][payload]
+    // Client control frames are small JSON texts:
+    //   {"cmd":"source","v":"screen"|"cam"}
+    //   {"cmd":"camera","v":"front"|"back"} / {"cmd":"flip"}
+    //   {"cmd":"audio","v":"on"|"off"}
+    //
+    // Camera frames come from the persistent ImageAnalysis preview stream
+    // (8–12 fps) instead of per-frame bind/capture/unbind (~0.5 fps).
+    // ============================================================
+
+    private suspend fun handleLiveWs(client: java.net.Socket, request: HttpRequest) {
+        val key = request.headers["sec-websocket-key"]
+            ?: return
+        val accept = LiveWsProtocol.acceptKey(key)
+        val output = client.getOutputStream()
+        val head = "HTTP/1.1 101 Switching Protocols\r\n" +
+            "Upgrade: websocket\r\n" +
+            "Connection: Upgrade\r\n" +
+            "Sec-WebSocket-Accept: $accept\r\n" +
+            "Cache-Control: no-store\r\n\r\n"
+        try {
+            output.write(head.toByteArray(Charsets.UTF_8))
+            output.flush()
+        } catch (e: Exception) {
+            return
+        }
+        client.soTimeout = 0 // long-lived session; ping keeps the peer honest
+
+        class LiveState {
+            @Volatile var source = "screen"
+            @Volatile var camLens = androidx.camera.core.CameraSelector.LENS_FACING_BACK
+            @Volatile var pipOn = true
+            @Volatile var audioOn = true
+            @Volatile var running = true
+        }
+        val st = LiveState()
+
+        val micChannel = try { micController.startLiveStream() } catch (_: Exception) { null }
+
+        // Reader: control frames from the browser.
+        val readerJob = kotlinx.coroutines.GlobalScope.launch(Dispatchers.IO) {
+            try {
+                while (st.running) {
+                    val frame = LiveWsProtocol.readFrame(client.getInputStream()) ?: break
+                    when (frame.first) {
+                        LiveWsProtocol.OP_CLOSE -> break
+                        LiveWsProtocol.OP_PING -> {
+                            LiveWsProtocol.writeFrame(output, LiveWsProtocol.OP_PONG, frame.second)
+                        }
+                        LiveWsProtocol.OP_TEXT -> {
+                            val text = String(frame.second, Charsets.UTF_8)
+                            try {
+                                val obj = Json.parseToJsonElement(text).jsonObject
+                                when (obj["cmd"]?.jsonPrimitive?.content) {
+                                    "source" -> {
+                                        val v = obj["v"]?.jsonPrimitive?.content ?: "screen"
+                                        st.source = v
+                                        if (v == "cam") {
+                                            cameraController.startPreviewStream(st.camLens)
+                                        } else {
+                                            cameraController.stopPreviewStream()
+                                            // Front-cam PiP keeps running in screen mode.
+                                            if (st.pipOn) cameraController.startPreviewStream(
+                                                androidx.camera.core.CameraSelector.LENS_FACING_FRONT
+                                            )
+                                        }
+                                    }
+                                    "camera" -> {
+                                        st.camLens = if (obj["v"]?.jsonPrimitive?.content == "front")
+                                            androidx.camera.core.CameraSelector.LENS_FACING_FRONT
+                                        else
+                                            androidx.camera.core.CameraSelector.LENS_FACING_BACK
+                                        if (st.source == "cam") cameraController.startPreviewStream(st.camLens)
+                                    }
+                                    "flip" -> {
+                                        st.camLens = if (st.camLens == androidx.camera.core.CameraSelector.LENS_FACING_FRONT)
+                                            androidx.camera.core.CameraSelector.LENS_FACING_BACK
+                                        else
+                                            androidx.camera.core.CameraSelector.LENS_FACING_FRONT
+                                        if (st.source == "cam") cameraController.startPreviewStream(st.camLens)
+                                    }
+                                    "pip" -> {
+                                        st.pipOn = obj["v"]?.jsonPrimitive?.content == "on"
+                                        if (st.source == "screen") {
+                                            if (st.pipOn) cameraController.startPreviewStream(
+                                                androidx.camera.core.CameraSelector.LENS_FACING_FRONT
+                                            )
+                                            else cameraController.stopPreviewStream()
+                                        }
+                                    }
+                                    "audio" -> st.audioOn = obj["v"]?.jsonPrimitive?.content == "on"
+                                }
+                            } catch (_: Exception) { }
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+            } finally {
+                st.running = false
+            }
+        }
+
+        try {
+            if (st.source == "cam") {
+                cameraController.startPreviewStream(st.camLens)
+            } else if (st.pipOn) {
+                cameraController.startPreviewStream(androidx.camera.core.CameraSelector.LENS_FACING_FRONT)
+            }
+            var lastCamSeq = -1L
+            var lastPipSeq = -1L
+            var lastFrameAt = 0L
+            val minFrameGap = 60L // ~16 fps cap
+            while (st.running) {
+                val now = System.currentTimeMillis()
+                if (now - lastFrameAt >= minFrameGap) {
+                    var sent = false
+                    if (st.source == "cam") {
+                        val seq = cameraController.previewSeq()
+                        if (seq >= 0 && seq != lastCamSeq) {
+                            val jpeg = cameraController.readLatestPreviewFrame()
+                            if (jpeg != null) {
+                                val channel = if (st.camLens == androidx.camera.core.CameraSelector.LENS_FACING_FRONT) 0x03 else 0x02
+                                if (LiveWsProtocol.writeFrame(output, LiveWsProtocol.OP_BINARY, framePayload(channel, jpeg))) {
+                                    lastCamSeq = seq
+                                    sent = true
+                                } else break
+                            }
+                        }
+                    } else {
+                        val jpeg = screenCaptureController.captureFrame()
+                        if (jpeg != null) {
+                            if (!LiveWsProtocol.writeFrame(output, LiveWsProtocol.OP_BINARY, framePayload(0x01, jpeg))) break
+                            sent = true
+                        }
+                        // Front-cam PiP while the main view is the screen.
+                        if (st.pipOn) {
+                            val seq = cameraController.previewSeq()
+                            if (seq >= 0 && seq != lastPipSeq) {
+                                val pipJpeg = cameraController.readLatestPreviewFrame()
+                                if (pipJpeg != null) {
+                                    if (!LiveWsProtocol.writeFrame(output, LiveWsProtocol.OP_BINARY, framePayload(0x03, pipJpeg))) break
+                                    lastPipSeq = seq
+                                }
+                            }
+                        }
+                    }
+                    if (sent) lastFrameAt = System.currentTimeMillis()
+                }
+                if (st.audioOn && micChannel != null) {
+                    // Drain every buffered chunk so audio never lags behind
+                    // the video (the loop blocks during screen captures).
+                    var chunk = micChannel.tryReceive().getOrNull()
+                    while (chunk != null) {
+                        if (!LiveWsProtocol.writeFrame(output, LiveWsProtocol.OP_BINARY, framePayload(0x04, chunk))) {
+                            st.running = false
+                            break
+                        }
+                        chunk = micChannel.tryReceive().getOrNull()
+                    }
+                }
+                kotlinx.coroutines.delay(30)
+            }
+        } finally {
+            st.running = false
+            readerJob.cancel()
+            cameraController.stopPreviewStream()
+            if (micChannel != null) {
+                try { micController.stopLiveStream(micChannel) } catch (_: Exception) { }
+            }
+        }
+    }
+
+    /** [1 byte channel][4 byte big-endian length][payload] */
+    private fun framePayload(channel: Int, payload: ByteArray): ByteArray {
+        val out = ByteArray(5 + payload.size)
+        out[0] = channel.toByte()
+        out[1] = ((payload.size shr 24) and 0xFF).toByte()
+        out[2] = ((payload.size shr 16) and 0xFF).toByte()
+        out[3] = ((payload.size shr 8) and 0xFF).toByte()
+        out[4] = (payload.size and 0xFF).toByte()
+        System.arraycopy(payload, 0, out, 5, payload.size)
+        return out
+    }
+
     /**
      * Shared MJPEG writer: pushes JPEG frames as multipart parts until the
      * client disconnects (write throws), the frame source fails too many
@@ -1500,6 +1725,14 @@ class SimpleHttpServer(
                 return
             }
 
+            // WebSocket session: the handler performs the RFC 6455 upgrade
+            // on the raw socket and runs its own frame loops.
+            if (response.wsHandler != null) {
+                response.wsHandler!!.invoke(client)
+                Log.i("ArtemisServer", "<- ws ended ${request.method} ${request.path}")
+                return
+            }
+
             // Send the response
             sendHttpResponse(output, response)
         } catch (e: Exception) {
@@ -1608,7 +1841,7 @@ class SimpleHttpServer(
             for ((key, value) in response.headers) {
                 headerLines.append("$key: $value\r\n")
             }
-            headerLines.append("Server: Artemis/2.3.0\r\n")
+            headerLines.append("Server: Artemis/2.3.1\r\n")
             headerLines.append("\r\n")
             output.write(headerLines.toString().toByteArray(Charsets.UTF_8))
             output.flush()
@@ -1644,7 +1877,7 @@ class SimpleHttpServer(
             for ((key, value) in response.headers) {
                 headerLines.append("$key: $value\r\n")
             }
-            headerLines.append("Server: Artemis/2.3.0\r\n")
+            headerLines.append("Server: Artemis/2.3.1\r\n")
             headerLines.append("\r\n")
 
             output.write(headerLines.toString().toByteArray(Charsets.UTF_8))

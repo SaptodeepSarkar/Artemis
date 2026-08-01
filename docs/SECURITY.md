@@ -1,6 +1,6 @@
 # Artemis Sentinel — Security Architecture
 
-Version 2.3.0 · August 2026 · Applies to the Android app (Artiest/), the web
+Version 2.3.1 · August 2026 · Applies to the Android app (Artiest/), the web
 dashboard (dashboard_web/) and the CLI (dashboard/artemis.py).
 
 This document covers the transport, authentication, token lifecycle, pairing,
@@ -219,6 +219,13 @@ that imports a per-dashboard client cert, enabling true mTLS.
   token/refresh-token deletion is automatic on replay/mismatch.
 - **Stolen refresh token:** replay detection (Section 2.2) revokes the
   device automatically; the phone screen shows the dashboard as revoked.
+- **Long-lived streams / WebSocket (v2.3.1):** `/api/v1/ws/live` upgrades
+  only after the normal `Authorization: Bearer` check (`wsLiveAuth`,
+  same validation as any route); the raw socket is handed to the WS
+  session only post-auth. The session lives as long as the client keeps
+  it open — an access-token rotation does NOT kick an open session
+  (documented trade-off: media pipelines must not be interrupted by
+  refresh; the WS is pinned to the token that opened it).
 
 ---
 

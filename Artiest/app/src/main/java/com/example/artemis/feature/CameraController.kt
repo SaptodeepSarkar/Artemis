@@ -9,6 +9,7 @@ import android.graphics.ImageFormat
 import android.graphics.Rect
 import android.graphics.YuvImage
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
@@ -131,6 +132,10 @@ class CameraController(
 
     private suspend fun capturePhotoLocked(lensFacing: Int): Result<MediaCapture> {
         try {
+                // A photo capture rebinds the camera — release the live
+                // preview stream first so the bind is exclusive.
+                stopPreviewStream()
+
                 val cameraSelector = CameraSelector.Builder()
                     .requireLensFacing(lensFacing)
                     .build()
@@ -230,6 +235,9 @@ class CameraController(
         if (!hasCameraPermission()) return@withContext null
 
         try {
+            // Release any active live preview before rebinding the camera.
+            stopPreviewStream()
+
             val cameraSelector = CameraSelector.Builder()
                 .requireLensFacing(lensFacing)
                 .build()
@@ -301,6 +309,198 @@ class CameraController(
         } catch (e: Exception) {
             android.util.Log.w("ArtemisCam", "downscale failed: ${e.message}")
             jpeg
+        }
+    }
+
+    // ============================================================
+    // Live preview stream (v2.3.1 — smooth WebSocket video)
+    // A persistent ImageAnalysis binding (640x480) converts every frame
+    // to a small JPEG on its own executor; the WS session polls the
+    // latest frame instead of doing a slow bind→capture→unbind per
+    // frame (that was ~0.5 fps on the M51 — this runs 8–12 fps).
+    // ============================================================
+
+    private val previewMutex = Any()
+    private var previewActive = false
+    private var previewLens = CameraSelector.LENS_FACING_BACK
+    private var latestPreviewJpeg: ByteArray? = null
+    private var latestPreviewSeq = 0L
+    private var previewProvider: ProcessCameraProvider? = null
+    private var previewExecutor: java.util.concurrent.ExecutorService? = null
+
+    fun isPreviewStreaming(): Boolean = synchronized(previewMutex) { previewActive }
+
+    /** Sequence of the newest analyser frame (monotonic; -1 when idle). */
+    fun previewSeq(): Long = synchronized(previewMutex) {
+        if (previewActive) latestPreviewSeq else -1L
+    }
+
+    /** Latest JPEG from the analyser, or null. */
+    fun readLatestPreviewFrame(): ByteArray? = synchronized(previewMutex) { latestPreviewJpeg }
+
+    /** Switch the live preview to another lens (front/back). */
+    suspend fun switchPreviewLens(lensFacing: Int) {
+        synchronized(previewMutex) {
+            if (!previewActive || previewLens == lensFacing) return
+        }
+        startPreviewStream(lensFacing)
+    }
+
+    /**
+     * Bind ImageAnalysis and stream JPEG frames into the latest-frame
+     * buffer. Returns false when the camera permission is missing or the
+     * bind fails (caller should surface a clear error, not crash).
+     */
+    suspend fun startPreviewStream(lensFacing: Int): Boolean {
+        if (!hasCameraPermission()) return false
+        synchronized(previewMutex) {
+            if (previewActive && previewLens == lensFacing) return true
+            if (previewActive) stopPreviewStreamLocked()
+        }
+        return try {
+            val cameraSelector = CameraSelector.Builder()
+                .requireLensFacing(lensFacing)
+                .build()
+            val cameraProvider = ProcessCameraProvider.getInstance(context).get()
+
+            val analysis = ImageAnalysis.Builder()
+                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                .setTargetResolution(android.util.Size(640, 480))
+                .setTargetRotation(android.view.Surface.ROTATION_0)
+                .build()
+
+            val executor = Executors.newSingleThreadExecutor()
+            analysis.setAnalyzer(executor) { image ->
+                try {
+                    val jpeg = yuvToJpeg(image, 55)
+                    synchronized(previewMutex) {
+                        if (previewActive && previewLens == lensFacing) {
+                            latestPreviewJpeg = jpeg
+                            latestPreviewSeq++
+                        }
+                    }
+                } catch (_: Exception) {
+                } finally {
+                    image.close()
+                }
+            }
+
+            var bound = false
+            withContext(Dispatchers.Main.immediate) {
+                try {
+                    cameraProvider.bindToLifecycle(
+                        lifecycleOwner,
+                        cameraSelector,
+                        analysis
+                    )
+                    bound = true
+                } catch (_: Exception) {
+                    bound = false
+                }
+            }
+            if (!bound) {
+                executor.shutdown()
+                return false
+            }
+            synchronized(previewMutex) {
+                previewActive = true
+                previewLens = lensFacing
+                previewProvider = cameraProvider
+                previewExecutor = executor
+                latestPreviewJpeg = null
+                latestPreviewSeq = 0L
+            }
+            true
+        } catch (e: Exception) {
+            android.util.Log.e("ArtemisCam", "startPreviewStream failed: ${e.message}")
+            false
+        }
+    }
+
+    /** Stop the live preview and release the camera binding. */
+    suspend fun stopPreviewStream() {
+        synchronized(previewMutex) {
+            stopPreviewStreamLocked()
+        }
+    }
+
+    private fun stopPreviewStreamLocked() {
+        val provider = previewProvider
+        val executor = previewExecutor
+        previewProvider = null
+        previewExecutor = null
+        previewActive = false
+        latestPreviewJpeg = null
+        latestPreviewSeq = 0L
+        if (executor != null) {
+            try { executor.shutdown() } catch (_: Exception) {}
+        }
+        if (provider != null) {
+            // unbindAll must run on the main thread; post and forget —
+            // the next bind on the main dispatcher serializes after it.
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                try { provider.unbindAll() } catch (_: Exception) {}
+            }
+        }
+    }
+
+    /**
+     * Convert a YUV_420_888 ImageProxy to a JPEG ByteArray (NV21 → YuvImage).
+     * Applies the image's rotation metadata via decode→rotate→re-encode;
+     * at 640x480 that is ~10 ms — cheap enough at 10 fps.
+     */
+    private fun yuvToJpeg(image: ImageProxy, quality: Int): ByteArray {
+        val width = image.width
+        val height = image.height
+        val planes = image.planes
+        val yPlane = planes[0]
+        val uPlane = planes[1]
+        val vPlane = planes[2]
+
+        val nv21 = ByteArray(width * height * 3 / 2)
+        var pos = 0
+        val yBuffer = yPlane.buffer
+        val yRowStride = yPlane.rowStride
+        val yPixStride = yPlane.pixelStride
+        for (row in 0 until height) {
+            val rowStart = row * yRowStride
+            for (col in 0 until width) {
+                nv21[pos++] = yBuffer.get(rowStart + col * yPixStride)
+            }
+        }
+        val uBuffer = uPlane.buffer
+        val vBuffer = vPlane.buffer
+        val uvRowStride = uPlane.rowStride
+        val uvPixStride = uPlane.pixelStride
+        val uvWidth = width / 2
+        val uvHeight = height / 2
+        for (row in 0 until uvHeight) {
+            val rowStart = row * uvRowStride
+            for (col in 0 until uvWidth) {
+                val uvIdx = rowStart + col * uvPixStride
+                nv21[pos++] = vBuffer.get(uvIdx)
+                nv21[pos++] = uBuffer.get(uvIdx)
+            }
+        }
+
+        val yuv = YuvImage(nv21, ImageFormat.NV21, width, height, null)
+        val out = ByteArrayOutputStream()
+        yuv.compressToJpeg(Rect(0, 0, width, height), quality, out)
+        val raw = out.toByteArray()
+
+        val rotation = image.imageInfo.rotationDegrees
+        if (rotation == 0) return raw
+        return try {
+            val src = BitmapFactory.decodeByteArray(raw, 0, raw.size) ?: return raw
+            val matrix = android.graphics.Matrix().apply { postRotate(rotation.toFloat()) }
+            val rotated = Bitmap.createBitmap(src, 0, 0, src.width, src.height, matrix, true)
+            src.recycle()
+            val out2 = ByteArrayOutputStream()
+            rotated.compress(Bitmap.CompressFormat.JPEG, quality, out2)
+            rotated.recycle()
+            out2.toByteArray()
+        } catch (_: Exception) {
+            raw
         }
     }
 

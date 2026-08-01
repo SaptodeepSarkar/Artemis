@@ -477,3 +477,37 @@ def stream(host: str, path: str, token: str | None = None, port: int = 8443,
             s.close()
         except Exception:
             pass
+
+
+async def ws_live(host: str, token: str, port: int = 8443,
+                  cert_fp: str | None = None):
+    """Open the phone's live-view WebSocket (v2.3.1).
+
+    Connects wss://host:port/api/v1/ws/live with the token in the query
+    string (browsers can't set WS headers), applies the same TOFU cert
+    pin as every other device call, and returns the websockets client
+    connection. The caller relays binary frames (screen/cam JPEG + PCM
+    mic) and JSON text controls between it and the browser.
+
+    Raises RuntimeError on TLS pin mismatch / auth / connect failure.
+    """
+    import asyncio
+    import websockets
+    ctx = _make_tls_context()  # CERT_NONE; pin is enforced below
+    url = f"wss://{host}:{port}/api/v1/ws/live?token={token}"
+    ws = await websockets.connect(
+        url, ssl=ctx, ping_interval=None, open_timeout=10.0, max_size=4 * 1024 * 1024,
+    )
+    try:
+        ssl_obj = ws.transport.get_extra_info("ssl_object") if ws.transport else None
+        peer_der = ssl_obj.getpeercert(binary_form=True) if ssl_obj else b""
+        observed_pin = _pin_of(peer_der) if peer_der else ""
+        if cert_fp and observed_pin and not hmac.compare_digest(cert_fp, observed_pin):
+            await ws.close()
+            raise RuntimeError("cert_mismatch")
+    except RuntimeError:
+        raise
+    except Exception as e:
+        await ws.close()
+        raise RuntimeError(f"ws_tls: {e}")
+    return ws

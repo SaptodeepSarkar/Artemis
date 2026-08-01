@@ -1,101 +1,97 @@
-# Artemis Sentinel — Handoff: Video-Call / LIVE VIEW (v2.3.0)
+# Artemis Sentinel — Handoff: LIVE VIEW WebSocket pipeline (v2.3.1)
 
-> Written 2026-08-01, after v2.3.0 shipped (helpers + video-call phase,
-> live-verified). Read `docs/AGENTS.md` first (project reference +
-> frozen-sector rules), then `docs/SECURITY.md` (threat model), then this
-> document, then the source.
+> Written 2026-08-01, after v2.3.1 shipped (LIVE VIEW WebSocket pipeline,
+> flip, no-default-app, live-verified). Read `docs/AGENTS.md` first
+> (project reference + frozen-sector rules), then `docs/SECURITY.md`
+> (threat model), then this document, then the source.
 
 ---
 
-## 1. DONE — what shipped in v2.3.0 (all live-verified on the M51)
+## 1. DONE — what shipped in v2.3.1 (all live-verified on the M51)
 
-### 1.1 Zero-consent screen capture (accessibility pivot)
+### 1.1 WebSocket LIVE VIEW replaces MJPEG (the user's static + lag fixes)
 
-User directive: "the app is a device admin so it should not require
-consent for anything."
+User feedback that drove this phase: "camera feed is green/grey static",
+"too laggy — I want smooth playback", "flip feature", and "I don't want
+the app to be a default caller/SMS — I want to keep receiving calls and
+SMS on my phone's own caller and SMS apps."
 
-- `feature/RemoteControlService.kt` — the EXISTING accessibility service
-  (remote-control input) now also captures: `takeScreenshot()` (API 30+,
-  `canTakeScreenshot="true"` in `res/xml/accessibility_service_config.xml`).
-  ONE service = remote control + screen capture (one Settings toggle).
-- `feature/ScreenCaptureController.kt` — accessibility-first `captureFrame()`;
-  MediaProjection (`service/ScreenCaptureService.kt`) kept only as
-  documented fallback. `/screen/status` returns `enabled/active/method`.
-- VERIFIED: `POST /screen/capture` → valid JPEG with ZERO dialogs, app
-  swiped away, and after `install -r`. Enable (one-time):
-  `settings put secure enabled_accessibility_services
-  com.example.artemis/com.example.artemis.feature.RemoteControlService;
-  settings put secure accessibility_enabled 1` — survives reinstall/reboot.
+- **Root cause found and fixed**: the browser-side static AND the WS
+  drops were ONE bug — `LiveWsProtocol.encodeFrame` only implemented the
+  16-bit extended length (opcode 126). Full-res screen JPEGs (200–400 KB)
+  silently wrapped the length field, desyncing the client
+  (websockets lib → 1002 "invalid opcode"; browser canvas → dropped
+  stream). **64-bit extended length (opcode 127) added for payloads
+  > 64 KiB.** Cam frames stayed under 64 KiB, which is why only screen
+  mode broke. Verified by a raw-socket frame validator
+  (`/tmp/ws_hex.py` pattern) and the full browser flow.
+- **`GET /api/v1/ws/live`** — RFC 6455 WebSocket, hand-rolled in
+  `server/LiveWebSocket.kt` (NO new Android deps): `acceptKey` =
+  Base64(SHA1(key+MAGIC)), unmasked server→client, masked client→server,
+  ping/pong/close, text controls + binary media.
+- **Frame protocol** (binary): `[1B channel][4B BE length][data]`.
+  `1`=screen JPEG, `2`=back-cam, `3`=front-cam (PiP), `4`=PCM16 mic
+  (mono 44.1 kHz, ~4 KB chunks). JSON text controls:
+  `{"cmd":"source","v":"screen|cam"}`, `{"cmd":"camera","v":"back|front"}`,
+  `{"cmd":"pip","v":"on|off"}`, `{"cmd":"audio","v":"on|off"}`.
+- **Performance**: back cam ≈7.5–8 fps (was 0.5 fps MJPEG) via the new
+  persistent 640×480 `ImageAnalysis` preview binding in
+  `CameraController.kt` (`previewExecutor`, `startPreviewStream`/
+  `stopPreviewStream`; photo/frame captures stop the preview first —
+  camera exclusivity). Screen ≈3 fps (accessibility `takeScreenshot`
+  latency — inherent). Audio continuous.
+- **Flip**: `LiveState.camLens` (BACK default) + `{cmd:"camera"}` —
+  dashboard FLIP button toggles live, label syncs.
+- **Dashboard**: `server/__init__.py` `@app.websocket` proxy →
+  `websockets.connect` (cert-pin trust model, token on upgrade);
+  `static/js/dashboard.js` binary-channel parsing → `<canvas>`
+  (`liveMain`/`livePip`) + WebAudio; state in
+  `liveOn/liveSource/liveLens/micAudioOn`; `sendWs({cmd})`; onopen sends
+  source/camera/pip/audio and shows the PiP wrap; auto-starts mic audio.
+- VERIFIED end-to-end in the browser: screen phase (WS open, main
+  1080×2400 canvas lit, PiP 1088×1088 lit + visible), cam switch (WS
+  HELD — previously dropped), flip (lens→front, label "FLIP: FRONT"),
+  STOP (clean teardown, ws null). Protocol level: `/tmp/ws_repro.py`
+  (screen→cam→flip, all channels, still-open), `/tmp/ws_hex.py` (every
+  frame's opcode/length/channel validated OK incl. 127-extended).
 
-### 1.2 Live streams (the "video call" area)
+### 1.2 No default-app dependency (user mandate)
 
-- `GET /api/v1/stream/screen` — MJPEG (`multipart/x-mixed-replace`),
-  ~2.5 fps, frame ≈ 160 KB (accessibility backend).
-- `GET /api/v1/stream/camera?camera=front|back` — MJPEG, ~0.5–0.7 fps
-  (CameraX single-capture latency; known limit, preview-stream feed is
-  the future optimization).
-- `GET /api/v1/stream/mic` — raw PCM16 mono 44.1 kHz (Microphone +
-  AudioRecord loop → synchronized buffer; recording and streaming are
-  mutually exclusive).
-- Server plumbing: `HttpResponse.streamBody` (suspend lambda) +
-  `sendStreamHead()`; stream ends on client disconnect (socket close).
+- **SET DEFAULT SMS / SET DEFAULT DIALER card REMOVED** from
+  `DashboardScreen.kt`. Artemis never becomes the default SMS app or
+  default dialer — the user's stock Samsung apps keep receiving calls
+  and SMS. SMS-delete remains Android-blocked (provider protection;
+  `WRITE_SMS` not pm-grantable on this device) — the dashboard copy
+  states the caveat; call-log delete still works (`WRITE_CALL_LOG`
+  grantable on Samsung).
 
-### 1.3 Dashboard LIVE VIEW panel (replaces the capture button)
+### 1.3 Version
 
-- `dashboard_web/templates/dashboard.html` + `static/js/dashboard.js`:
-  main feed img (screen ⇄ back-cam toggle), front-cam PiP top-right
-  (toggle), mic audio via WebAudio ScriptProcessor (toggle), STOP button,
-  `beforeunload` kills all streams. Battery card in the status strip.
-- Web proxies: `/api/device/{host}/{port}/stream/{screen,camera,mic}`,
-  `.../battery`, `.../screen/status`, `.../sms/delete`,
-  `.../logs/calls/delete` (`server/device_client.py` `stream()` =
-  socket-stream generator → FastAPI `StreamingResponse`).
-- VERIFIED in-browser: screen feed 1080×2400, PiP 960×720, audio queue
-  filling, all toggles, clean stop.
-
-### 1.4 Deletes + battery
-
-- `POST /api/v1/sms/delete` + `/logs/calls/delete` by provider row id
-  (`SmsProvider.deleteSms`, `CallLogsProvider.deleteCallLog`,
-  permission-gated). Manifest: `WRITE_SMS`, `WRITE_CALL_LOG`.
-- Call-log delete WORKS on M51 (`pm grant` WRITE_CALL_LOG succeeds on
-  Samsung). SMS delete is silently no-op'd unless Artemis is the default
-  SMS app (Android restriction) — API returns a clear message; phone
-  dashboard has SET DEFAULT SMS / SET DEFAULT DIALER buttons.
-- `feature/BatteryHelper.kt` → `GET /api/v1/battery` (levelPercent,
-  isCharging, chargeSource, status, health, temperatureC, voltageMv,
-  technology). NOTE: data class is `BatterySnapshot` (BatteryInfo name
-  collides with `DeviceInfoProvider`'s).
-
-### 1.5 Other helpers shipped (previous handoff items)
-
-- `CameraFeedController` (`/camera/feed/start|stop|latest`),
-  `FileSystemHelper` (`/files/list|download|upload`, app-scoped root,
-  traversal 403, external roots gated by MANAGE_EXTERNAL_STORAGE),
-  `ContactsProvider` (`/contacts`), location `?fresh=1`.
-- Version: code 6 / `2.3.0`; `startForeground` mask = exactly
-  `mediaProjection` on API 34+; `LifecycleService` so CameraX
-  `bindToLifecycle` runs on the FGS lifecycle (main thread).
+- versionCode 7 / versionName "2.3.1"; `Server: Artemis/2.3.1`.
+  Build: `export JAVA_HOME=/opt/android-studio/jbr && export
+  PATH=$JAVA_HOME/bin:$PATH && ./gradlew :app:assembleDebug -q`.
+  Install: `adb install -r app/build/outputs/apk/debug/app-debug.apk`
+  then `am startservice -n com.example.artemis/.service.ArtemisSentinelService`
+  (install force-stops the app; `am start` alone does NOT bring the FGS
+  up on this device).
 
 ## 2. NEXT phase — candidates (pick what fits)
 
-1. **Front-cam feed smoothness**: camera stream is 0.5–0.7 fps because
-   each frame is a fresh CameraX ImageCapture (~1.5 s on M51). Build a
-   repeating front-cam feed (mirror `CameraFeedController` or make it
-   lens-aware) or switch the stream handler to the feed's latest-frame
-   cache. Also consider downscaling frames before the JPEG encode.
-2. **SMS delete UX**: set-as-default flow works, but the web dashboard
-   could surface the default-SMS status (check
-   `Telephony.Sms.getDefaultSmsPackage` in a `/sms/status`-style
-   endpoint) instead of the generic failure message.
-3. **Stream auth hardening** (if the threat model demands it): streams
-   are behind `requireAuth` like everything else, but they are
-   long-lived connections — verify token rotation mid-stream behaves
-   (it does not kick streams today; document or enforce).
-4. **Screen recording** (file output) via the same accessibility
-   backend — today it's capture-only (screenshots + stream); a
-   recording loop would reuse the accessibility `takeScreenshot` path
-   into a MediaMuxer/MP4 writer.
+1. **Screen fps**: accessibility `takeScreenshot` caps screen mode at
+   ~3 fps (each call is a full display capture + JPEG encode on the
+   executor). A lower-res target (cap `MAX_WIDTH` smaller for the WS
+   path, e.g. 960 px) and/or JPEG quality 60 would raise fps at the cost
+   of sharpness — the dashboard could offer a quality toggle.
+2. **Front-cam fps in screen mode**: the PiP runs the same 640×480
+   preview; bump to 720p when the M51 allows, or drop the PiP to a lower
+   target resolution to save encode time.
+3. **Backpressure / token rotation on long-lived WS**: the WS session
+   lives as long as the browser keeps it; a rotating access token does
+   not kick an open session (documented today, not enforced — decide
+   whether that matters for the threat model).
+4. **Reconnect UX**: `liveWs.onclose` sets `liveOn=false` — the button
+   shows START again; an auto-reconnect (with backoff) would smooth
+   transient Tailscale hops.
 5. Anything from the original helper backlog not yet wired into the
    dashboard UI (files browser panel, contacts panel).
 
@@ -109,8 +105,12 @@ consent for anything."
 - No Activity references in helpers; no `androidx.compose` in
   helper/server layer.
 - `HttpURLConnection` on the phone REQUIRES `\r\n` line endings.
+- Artemis must NEVER become default SMS app or default dialer (user
+  requirement — stock Samsung apps keep those roles).
+- WebSocket server frames with payloads > 64 KiB MUST use the 127
+  (64-bit) extended length — see the 2.7 doc note in AGENTS.md for why.
 
 ## 4. Delivery record
 
-- Commit + push `master`, message `v2.3.0:...`, tag `v2.3.0`, clean tree.
-- `docs/AGENTS.md` §2.2/§2.6 updated; `docs/SECURITY.md` header bumped.
+- Commit + push `master`, message `v2.3.1:...`, tag `v2.3.1`, clean tree.
+- `docs/AGENTS.md` §2.2/§2.7 updated; `docs/SECURITY.md` header bumped.

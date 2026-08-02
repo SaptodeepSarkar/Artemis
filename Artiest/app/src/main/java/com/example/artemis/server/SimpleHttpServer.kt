@@ -1440,9 +1440,13 @@ class SimpleHttpServer(
                                     "pip" -> {
                                         st.pipOn = obj["v"]?.jsonPrimitive?.content == "on"
                                         if (st.source == "screen") {
-                                            if (st.pipOn) cameraController.startPreviewStream(
-                                                androidx.camera.core.CameraSelector.LENS_FACING_FRONT
-                                            )
+                                            // PiP follows the SELECTED lens (camLens),
+                                            // not a hardcoded front camera. The old
+                                            // LENS_FACING_FRONT here made the PiP bind
+                                            // the front cam regardless of FLIP, so the
+                                            // rear-labeled window showed the front feed
+                                            // (and flipping appeared broken).
+                                            if (st.pipOn) cameraController.startPreviewStream(st.camLens)
                                             else cameraController.stopPreviewStream()
                                         }
                                     }

@@ -12,8 +12,8 @@ android {
         applicationId = "com.example.artemis"
         minSdk = 29
         targetSdk = 37
-        versionCode = 8
-        versionName = "2.3.3"
+        versionCode = 9
+        versionName = "2.4.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

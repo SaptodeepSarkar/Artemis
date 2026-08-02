@@ -398,17 +398,27 @@ class CameraController(
                 .build()
 
             val executor = Executors.newSingleThreadExecutor()
+            val previewQuality = 48               // heat: preview JPEG Q (was 55)
+            val minPreviewEncodeGapMs = 60L        // heat: cap analyzer JPEG encodes
+            var lastPreviewEncodeAt = 0L
             analysis.setAnalyzer(executor) { image ->
                 try {
-                    val nv21 = imageToNv21(image)
-                    if (nv21 != null) {
-                        val rotation = image.imageInfo.rotationDegrees
-                        recordSink?.invoke(lensFacing, nv21, image.width, image.height, rotation)
-                        val jpeg = nv21ToJpeg(nv21, image.width, image.height, rotation, 55)
-                        synchronized(previewMutex) {
-                            if (previewActive && previewLens == lensFacing) {
-                                latestPreviewJpeg = jpeg
-                                latestPreviewSeq++
+                    val now = System.currentTimeMillis()
+                    val rotation = image.imageInfo.rotationDegrees
+                    // Heat: encode a JPEG at most every ~60ms (matching the WS
+                    // ~16fps read cadence). CameraX delivers ~30fps; encoding
+                    // every frame burned ~half the JPEG encodes nobody read.
+                    if (now - lastPreviewEncodeAt >= minPreviewEncodeGapMs) {
+                        val nv21 = imageToNv21(image)
+                        if (nv21 != null) {
+                            recordSink?.invoke(lensFacing, nv21, image.width, image.height, rotation)
+                            val jpeg = nv21ToJpeg(nv21, image.width, image.height, rotation, previewQuality)
+                            synchronized(previewMutex) {
+                                if (previewActive && previewLens == lensFacing) {
+                                    latestPreviewJpeg = jpeg
+                                    latestPreviewSeq++
+                                    lastPreviewEncodeAt = now
+                                }
                             }
                         }
                     }

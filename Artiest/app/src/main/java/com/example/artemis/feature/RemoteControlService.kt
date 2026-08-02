@@ -242,8 +242,19 @@ class RemoteControlService : AccessibilityService() {
                     )
                     if (bmp != null) {
                         val out = java.io.ByteArrayOutputStream()
-                        bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 80, out)
+                        // Heat: downscale to ≤720px wide before the JPEG encode.
+                        // A 1080x2400 Q80 encode every ~60ms was a major CPU
+                        // load; 720px is still legible for remote control and
+                        // streams ~half the pixels through Tailscale.
+                        var enc = bmp
+                        if (bmp.width > 720) {
+                            val scale = 720f / bmp.width
+                            val h = (bmp.height * scale).toInt().coerceAtLeast(1)
+                            enc = android.graphics.Bitmap.createScaledBitmap(bmp, 720, h, true)
+                        }
+                        enc.compress(android.graphics.Bitmap.CompressFormat.JPEG, 72, out)
                         result = out.toByteArray()
+                        if (enc !== bmp) enc.recycle()
                     }
                 } catch (_: Exception) { }
                 finally {

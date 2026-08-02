@@ -6,12 +6,43 @@
 
 ---
 
-## 0. PHASE BRIEF (what the next agent builds) — WiFi helper + Bluetooth helper
+## 0. PHASE BRIEF — WiFi helper + Bluetooth helper, PLUS CPU/camera/location audit
 
-Two new **FGS-only helper services** that expose phone state to the dashboard
-over the existing protected HTTP/TLS surface. Do NOT touch the frozen
-auth/security sector (AGENTS.md §3.1). Volume control is ALREADY DONE (see
-§1, v2.4.4). The heat/offload item (§3) stays open and independent.
+### 0.START — How to work this phase (READ FIRST)
+
+**Device status: the M51 is in the fridge.** The LIVE stream pushed its
+battery to 50°C, so **no on-device testing until it cools** (and stream
+tests must stay short — minutes, not soak). Do the WiFi/BT and the audit
+below as host-side work; defer live M51 verify until it's cool.
+
+**Mandate**: you are expected to **spawn parallel subagents** to **search the
+whole app** and cut **CPU + camera + location** resource waste. This is the
+real heat fix at the source (not just encode tuning). Concretely:
+
+1. **Spawn N subagents over the repo** (phone Kotlin `Artiest/app/src/main`
+   and host `dashboard_web/`) with explicit goals:
+   - **CPU**: per-frame allocations, recreate-in-loop objects, busy-waits,
+     unthrottled WS loops, bitmap/hardware-buffer churn, wasteful re-allocs.
+   - **Camera**: CameraX ImageAnalysis pipeline — `imageToNv21` plane-walks,
+     `YuvImage.compressToJpeg` per frame, rotate re-encode, `takeScreenshot`
+     cadence, held-open bindings when idle.
+   - **Location**: `location_current` + any GNSS request loops — ensure a
+     one-shot "ACQUIRE FIX"/poll-cooldown, not a continuous update loop.
+   - Each subagent returns a concrete list: `file:line`, resource class
+     (CPU/camera/location), cost estimate, and a minimal patch.
+2. **Use graphify for context, not token-busting reads.** Repo has a graphify
+   MCP. Query the graph (neighbors of the WS/camera node, `query_graph`,
+   `get_node`) to map ownership/dependencies cheaply. Batch reads via
+   subagents instead of dragging whole files into one context — survey the APP
+   WIDE with minimal tokens.
+3. **Synthesize** subagent findings into ONE prioritized hit-list, then apply
+   the top heat wins (pair with §3.B). Confirm `git status` + a local build
+   assembles; do NOT burn phone time until the M51 is cool.
+4. Do not degrade security (FROZEN sector AGENTS.md §3.1), pairing, or the
+   "phone stays stateless" offload principle.
+
+Volume control is ALREADY DONE (§1, v2.4.4). The heat/offload item (§3)
+stays open and independent — this audit feeds it.
 
 ### 0.A WiFi helper — scan + connect info + strength
 Intent: dashboard shows current SSID / RSSI / link speed, and lists nearby

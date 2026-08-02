@@ -896,10 +896,6 @@ function setLiveVolume(val) {
     }
     const pct = document.getElementById("liveVolPct");
     if (pct) pct.textContent = liveVolume;
-    // Also drive the device's in-app volume via the WS when live (best-effort).
-    if (liveWs && liveWs.readyState === WebSocket.OPEN) {
-        try { liveWs.send(JSON.stringify({ cmd: "volume", v: liveVolume })); } catch (e) {}
-    }
 }
 
 function setLiveVolumeUI(enabled) {

@@ -445,8 +445,41 @@ function drawToCanvas(canvasId, blob) {
             c.height = bmp.height;
         }
         c.getContext("2d").drawImage(bmp, 0, 0);
+        fitLivePane(canvasId, bmp);
         bmp.close();
     }).catch(() => {});
+}
+
+// Size the LIVE VIEW panes from the REAL feed dimensions so neither the
+// screen nor the camera box letterboxes (no side/top black bars). Called on
+// every decoded frame; cheap — only writes styles when geometry changed.
+function fitLivePane(canvasId, bmp) {
+    const isScreen = canvasId === "liveMain";
+    const canvas = document.getElementById(canvasId);
+    if (!canvas || !bmp || bmp.width <= 0 || bmp.height <= 0) return;
+    const ratio = bmp.height / bmp.width;
+    // Available vertical space below the row (minus neighbouring UI margins).
+    const maxH = Math.round((window.innerHeight - 210) * 0.9);
+
+    let dispW, dispH;
+    if (isScreen) {
+        // Screen: keep the feed's natural portrait ratio, height-capped.
+        let w = Math.round(maxH / ratio);
+        if (w > 520) { w = 520; }
+        let h = Math.round(w * ratio);
+        if (h > maxH) { h = maxH; w = Math.round(h / ratio); }
+        dispW = w; dispH = h;
+        const card = document.getElementById("liveScreenCard");
+        if (card) { card.style.width = dispW + "px"; card.style.aspectRatio = String(dispW / dispH); }
+    } else {
+        // Camera: fills the column width, height = width / feed ratio (no bars).
+        const colW = canvas.parentElement ? canvas.parentElement.clientWidth : 220;
+        dispW = colW;
+        dispH = Math.round(colW / ratio);
+        const wrap = document.getElementById("livePipWrap");
+        if (wrap) wrap.style.height = dispH + "px";
+    }
+    canvas.style.aspectRatio = String(dispW / dispH);
 }
 
 function liveStatusHtml() {

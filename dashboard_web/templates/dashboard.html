@@ -197,10 +197,10 @@
 </h3>
 </div>
 <!-- Live Video Row: phone screen LEFT, camera feed RIGHT, controls below camera -->
-<div class="flex flex-col lg:flex-row gap-4 w-full items-stretch">
-<!-- LEFT — phone screen feed (width driven by the portrait screen feed). Tap/drag to remote-control. -->
-<div class="flex-1 min-w-0 flex justify-center">
-<div id="liveScreenCard" class="relative w-full max-w-[480px] bg-void-black border border-moon-silver/20 rounded overflow-hidden" style="aspect-ratio: 9/16;">
+<div class="flex flex-col lg:flex-row gap-4 w-full items-start justify-start">
+<!-- LEFT — phone screen feed (width follows the portrait feed; JS sets exact px + aspect). Tap/drag to remote-control. -->
+<div class="min-w-0">
+<div id="liveScreenCard" class="relative w-[360px] max-w-full bg-void-black border border-moon-silver/20 rounded overflow-hidden" style="aspect-ratio: 9/16;">
 <canvas id="liveMain" alt="Live phone screen — tap/drag to remote-control" class="absolute inset-0 w-full h-full object-contain" style="display:none"></canvas>
 <div id="livePlaceholder" class="absolute inset-0 flex flex-col items-center justify-center gap-3 text-moon-silver/40">
 <span class="material-symbols-outlined text-5xl">videocam_off</span>

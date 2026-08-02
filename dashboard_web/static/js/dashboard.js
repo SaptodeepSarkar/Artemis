@@ -425,7 +425,7 @@ let liveWs = null;
 
 function updateFlipLabel() {
     const b = document.getElementById("liveFlipBtn");
-    if (b) b.innerHTML = `<span class="material-symbols-outlined text-sm">flip_camera_android</span> CAM: ${liveLens === "front" ? "FRONT" : "REAR"}`;
+    if (b) b.title = "Show " + (liveLens === "front" ? "REAR" : "FRONT") + " camera";
     const label = document.getElementById("livePipLabel");
     if (label) label.textContent = liveLens === "front" ? "FRONT" : "REAR";
 }
@@ -450,7 +450,6 @@ function drawToCanvas(canvasId, blob) {
 }
 
 function liveStatusHtml() {
-    if (liveSource === "cam") return `<span>LIVE · CAM · ${liveLens.toUpperCase()}</span>`;
     return `<span>LIVE · SCREEN${pipOn ? " · CAM:" + liveLens.toUpperCase() : ""}</span>`;
 }
 
@@ -554,20 +553,6 @@ async function toggleLiveView() {
     }
 }
 
-function toggleLiveSource() {
-    liveSource = liveSource === "screen" ? "cam" : "screen";
-    const status = document.getElementById("liveStatus");
-    if (liveWs && liveWs.readyState === WebSocket.OPEN) {
-        sendWs({ cmd: "source", v: liveSource });
-        sendWs({ cmd: "camera", v: liveLens });
-        if (status) status.innerHTML = liveStatusHtml();
-    }
-    // CAM-only mode hides the PiP; screen mode shows it iff the user toggled it on.
-    applyPipDisplay();
-    const srcBtn = document.getElementById("liveSourceBtn");
-    if (srcBtn) srcBtn.innerHTML = `<span class="material-symbols-outlined text-sm">${liveSource === "screen" ? "screen_share" : "photo_camera"}</span> ${liveSource.toUpperCase()}`;
-}
-
 function toggleFlip() {
     liveLens = liveLens === "back" ? "front" : "back";
     sendWs({ cmd: "camera", v: liveLens });
@@ -580,14 +565,20 @@ function togglePip() {
     pipOn = !pipOn;
     const btn = document.getElementById("pipBtn");
     applyPipDisplay();
-    if (btn) btn.innerHTML = `<span class="material-symbols-outlined text-sm">camera_front</span> CAM PIP: ${pipOn ? "ON" : "OFF"}`;
+    if (btn) {
+        const span = btn.querySelector("span");
+        if (span) span.textContent = pipOn ? "videocam" : "videocam_off";
+        btn.title = pipOn ? "Hide camera feed" : "Show camera feed";
+        btn.classList.toggle("bg-maquis-green/10", pipOn);
+        btn.classList.toggle("border-maquis-green/50", pipOn);
+    }
     if (liveWs && liveWs.readyState === WebSocket.OPEN) sendWs({ cmd: "pip", v: pipOn ? "on" : "off" });
 }
 
-// The camera PiP is only ever shown in screen view AND when the user toggled it on.
+// The camera feed is shown on the right only while live AND toggled on.
 function applyPipDisplay() {
     const wrap = document.getElementById("livePipWrap");
-    if (wrap) wrap.style.display = liveSource === "screen" && pipOn ? "block" : "none";
+    if (wrap) wrap.style.display = pipOn ? "block" : "none";
 }
 
 // ---- v2.3.3: remote-admin control (tap/swipe/buttons), triple RECORD, PiP PLAY ----
@@ -597,7 +588,7 @@ const DEV_SCREEN_H = 2400;
 let recordingOn = false;
 
 function setLiveBtn(enabled) {
-    ["liveSourceBtn", "liveFlipBtn", "pipBtn", "micAudioBtn", "liveRecBtn"].forEach(id => {
+    ["liveFlipBtn", "pipBtn", "micAudioBtn", "liveRecBtn"].forEach(id => {
         const b = document.getElementById(id);
         if (!b) return;
         b.disabled = !enabled;
@@ -672,9 +663,9 @@ function showRecIndicator(on) {
 function setRecBtn(on) {
     const b = document.getElementById("liveRecBtn");
     if (!b) return;
-    b.innerHTML = on
-        ? '<span class="w-2.5 h-2.5 rounded-full bg-hunt-crimson animate-pulse"></span> STOP'
-        : '<span class="w-2.5 h-2.5 rounded-full bg-hunt-crimson"></span> RECORD';
+    const span = b.querySelector("span");
+    if (span) span.textContent = on ? "stop_circle" : "fiber_manual_record";
+    b.title = on ? "Stop recording" : "Record screen + both cameras";
     if (on) {
         b.classList.add("bg-hunt-crimson/10", "border-hunt-crimson/50", "text-hunt-crimson");
     } else {
@@ -809,29 +800,29 @@ function stopMicAudio() {
 function toggleMicAudio() {
     micAudioOn = !micAudioOn;
     const btn = document.getElementById("micAudioBtn");
+    if (btn) {
+        const span = btn.querySelector("span");
+        if (span) span.textContent = micAudioOn ? "volume_up" : "volume_off";
+        btn.title = micAudioOn ? "Mute audio" : "Unmute audio";
+        btn.classList.toggle("bg-maquis-green/10", micAudioOn);
+        btn.classList.toggle("border-maquis-green/50", micAudioOn);
+    }
     if (micAudioOn) {
         startMicAudio();
-        if (btn) {
-            btn.innerHTML = '<span class="material-symbols-outlined text-sm">volume_up</span> AUDIO: ON';
-            btn.classList.add("bg-maquis-green/10", "border-maquis-green/50", "text-maquis-green");
-        }
         sendWs({ cmd: "audio", v: "on" });
     } else {
         stopMicAudio();
-        if (btn) {
-            btn.innerHTML = '<span class="material-symbols-outlined text-sm">volume_off</span> AUDIO: OFF';
-            btn.classList.remove("bg-maquis-green/10", "border-maquis-green/50", "text-maquis-green");
-        }
         sendWs({ cmd: "audio", v: "off" });
     }
 }
 
-// Keep the AUDIO button label in sync with the state.
+// Keep mutable-icon buttons in sync with the initial state.
 (function initLiveUi() {
     const btn = document.getElementById("micAudioBtn");
-    if (btn && micAudioOn) {
-        btn.innerHTML = '<span class="material-symbols-outlined text-sm">volume_up</span> AUDIO: ON';
-        btn.classList.add("bg-maquis-green/10", "border-maquis-green/50", "text-maquis-green");
+    if (btn) {
+        const span = btn.querySelector("span");
+        if (span) span.textContent = micAudioOn ? "volume_up" : "volume_off";
+        if (micAudioOn) btn.classList.add("bg-maquis-green/10", "border-maquis-green/50");
     }
 })();
 

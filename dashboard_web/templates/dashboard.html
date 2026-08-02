@@ -196,8 +196,11 @@
 <span id="liveStatus" class="font-label text-[10px] tracking-widest text-maquis-green bg-void-black/60 border border-maquis-green/30 px-2 py-0.5 rounded ml-2">IDLE</span>
 </h3>
 </div>
-<!-- Phone screen feed — fits the phone's portrait width (no height clamp) -->
-<div id="liveScreenCard" class="relative bg-void-black border border-moon-silver/10 rounded overflow-hidden" style="width: 100%; max-width: 480px; aspect-ratio: 9/16; margin: 0 auto;">
+<!-- Live Video Row: phone screen LEFT, camera feed RIGHT, controls below camera -->
+<div class="flex flex-col lg:flex-row gap-4 w-full items-stretch">
+<!-- LEFT — phone screen feed (width driven by the portrait screen feed). Tap/drag to remote-control. -->
+<div class="flex-1 min-w-0 flex justify-center">
+<div id="liveScreenCard" class="relative w-full max-w-[480px] bg-void-black border border-moon-silver/20 rounded overflow-hidden" style="aspect-ratio: 9/16;">
 <canvas id="liveMain" alt="Live phone screen — tap/drag to remote-control" class="absolute inset-0 w-full h-full object-contain" style="display:none"></canvas>
 <div id="livePlaceholder" class="absolute inset-0 flex flex-col items-center justify-center gap-3 text-moon-silver/40">
 <span class="material-symbols-outlined text-5xl">videocam_off</span>
@@ -206,14 +209,6 @@
 <!-- RECORDING pulse indicator -->
 <div id="recIndicator" class="absolute top-2 left-2 z-20 hidden items-center gap-2 bg-void-black/80 border border-hunt-crimson/60 text-hunt-crimson font-label text-xs font-bold tracking-widest px-3 py-1.5 rounded-full">
 <span class="w-2.5 h-2.5 rounded-full bg-hunt-crimson animate-pulse"></span>REC
-</div>
-</div>
-<!-- Camera PiP strip — its own row BELOW the screen so it never blocks the feed -->
-<div id="livePipWrap" class="hidden" style="width: 180px; aspect-ratio: 9/16; margin: 12px auto 0;">
-<div class="relative w-full h-full bg-black border border-pyrenees-frost/50 rounded overflow-hidden shadow-[0_0_16px_rgba(123,164,200,0.3)]">
-<canvas id="livePip" class="w-full h-full object-contain"></canvas>
-<span id="livePipLabel" class="absolute bottom-1 left-1 bg-void-black/80 border border-moon-silver/30 text-moon-silver font-label text-[9px] tracking-widest px-1.5 py-0.5 rounded z-10">REAR</span>
-</div>
 </div>
 <!-- PiP player for triple RECORDINGS playback (v2.3.3) -->
 <div id="recordPipWrap" class="absolute top-2 right-2 z-20 hidden" style="width: 45%; aspect-ratio: 9/16;">
@@ -224,47 +219,51 @@
 </button>
 </div>
 </div>
-<div class="mt-4 flex flex-wrap items-center justify-center gap-3">
-<button onclick="toggleLiveView()" id="liveBtn" class="px-6 py-3 bg-hunt-crimson/10 border border-hunt-crimson/50 text-hunt-crimson font-label text-sm font-bold tracking-widest rounded hover:bg-hunt-crimson hover:text-white transition-all flex items-center justify-center gap-2">
-<span class="material-symbols-outlined text-lg">play_arrow</span>
-                                START LIVE VIEW
-                            </button>
-<button onclick="toggleLiveSource()" id="liveSourceBtn" disabled class="px-4 py-3 bg-void-black border border-moon-silver/20 text-moon-silver font-label text-xs font-bold tracking-widest rounded opacity-40 cursor-not-allowed flex items-center justify-center gap-2">
-<span class="material-symbols-outlined text-sm">screen_share</span>
-                                SCREEN
-                            </button>
-<button onclick="toggleFlip()" id="liveFlipBtn" disabled class="px-4 py-3 bg-void-black border border-moon-silver/20 text-moon-silver font-label text-xs font-bold tracking-widest rounded opacity-40 cursor-not-allowed flex items-center justify-center gap-2">
-<span class="material-symbols-outlined text-sm">flip_camera_android</span>
-                                CAM: REAR
-                            </button>
-<button onclick="togglePip()" id="pipBtn" disabled class="px-4 py-3 bg-void-black border border-moon-silver/20 text-moon-silver font-label text-xs font-bold tracking-widest rounded opacity-40 cursor-not-allowed flex items-center justify-center gap-2">
-<span class="material-symbols-outlined text-sm">camera_front</span>
-                                CAM PIP: ON
-                            </button>
-<button onclick="toggleMicAudio()" id="micAudioBtn" disabled class="px-4 py-3 bg-void-black border border-moon-silver/20 text-moon-silver font-label text-xs font-bold tracking-widest rounded opacity-40 cursor-not-allowed flex items-center justify-center gap-2">
-<span class="material-symbols-outlined text-sm">volume_up</span>
-                                AUDIO: OFF
-                            </button>
-<button onclick="toggleRecord()" id="liveRecBtn" disabled class="px-4 py-3 bg-void-black border border-moon-silver/20 text-moon-silver font-label text-xs font-bold tracking-widest rounded opacity-40 cursor-not-allowed flex items-center justify-center gap-2">
-<span class="w-2.5 h-2.5 rounded-full bg-hunt-crimson"></span>
-                                RECORD
-                            </button>
 </div>
-<!-- Remote-control pad (v2.3.3): tap/drag the feed + system buttons -->
-<div class="mt-3 flex flex-wrap items-center justify-center gap-2" id="controlPad">
-<button onclick="sendGlobalAction('home')" disabled class="ctl-btn px-4 py-2 bg-void-black border border-moon-silver/20 text-moon-silver font-label text-xs font-bold tracking-widest rounded opacity-40 cursor-not-allowed hover:border-hunt-crimson hover:text-hunt-crimson transition-colors flex items-center gap-2">
-<span class="material-symbols-outlined text-sm">home</span>HOME
+</div>
+<!-- RIGHT — camera feed; its height follows the actual camera aspect, controls sit below it -->
+<div class="flex flex-col gap-3 lg:w-[220px] justify-start">
+<!-- Camera feed -->
+<div id="livePipWrap" class="hidden w-full">
+<div class="relative w-full bg-black border border-pyrenees-frost/50 rounded overflow-hidden shadow-[0_0_16px_rgba(123,164,200,0.3)]">
+<canvas id="livePip" class="block w-full h-auto object-contain" style="aspect-ratio: auto;"></canvas>
+<span id="livePipLabel" class="absolute bottom-1 left-1 bg-void-black/80 border border-moon-silver/30 text-moon-silver font-label text-[9px] tracking-widest px-1.5 py-0.5 rounded z-10">REAR</span>
+</div>
+</div>
+<!-- Icon-only control grid (2 columns); mobile navigation at the top -->
+<div class="grid grid-cols-2 gap-2 w-full" id="controlPad">
+<button onclick="sendGlobalAction('home')" disabled class="ctl-btn aspect-square bg-void-black border border-moon-silver/20 text-moon-silver rounded opacity-40 cursor-not-allowed hover:border-hunt-crimson hover:text-hunt-crimson transition-colors flex items-center justify-center" title="HOME">
+<span class="material-symbols-outlined text-xl">home</span>
 </button>
-<button onclick="sendGlobalAction('back')" disabled class="ctl-btn px-4 py-2 bg-void-black border border-moon-silver/20 text-moon-silver font-label text-xs font-bold tracking-widest rounded opacity-40 cursor-not-allowed hover:border-hunt-crimson hover:text-hunt-crimson transition-colors flex items-center gap-2">
-<span class="material-symbols-outlined text-sm">arrow_back</span>BACK
+<button onclick="sendGlobalAction('back')" disabled class="ctl-btn aspect-square bg-void-black border border-moon-silver/20 text-moon-silver rounded opacity-40 cursor-not-allowed hover:border-hunt-crimson hover:text-hunt-crimson transition-colors flex items-center justify-center" title="BACK">
+<span class="material-symbols-outlined text-xl">arrow_back</span>
 </button>
-<button onclick="sendGlobalAction('recents')" disabled class="ctl-btn px-4 py-2 bg-void-black border border-moon-silver/20 text-moon-silver font-label text-xs font-bold tracking-widest rounded opacity-40 cursor-not-allowed hover:border-hunt-crimson hover:text-hunt-crimson transition-colors flex items-center gap-2">
-<span class="material-symbols-outlined text-sm">apps</span>RECENTS
+<button onclick="sendGlobalAction('recents')" disabled class="ctl-btn aspect-square bg-void-black border border-moon-silver/20 text-moon-silver rounded opacity-40 cursor-not-allowed hover:border-hunt-crimson hover:text-hunt-crimson transition-colors flex items-center justify-center" title="RECENTS">
+<span class="material-symbols-outlined text-xl">apps</span>
 </button>
-<button onclick="sendGlobalAction('lock')" disabled class="ctl-btn px-4 py-2 bg-void-black border border-moon-silver/20 text-moon-silver font-label text-xs font-bold tracking-widest rounded opacity-40 cursor-not-allowed hover:border-hunt-crimson hover:text-hunt-crimson transition-colors flex items-center gap-2">
-<span class="material-symbols-outlined text-sm">lock</span>LOCK
+<button onclick="sendGlobalAction('lock')" disabled class="ctl-btn aspect-square bg-void-black border border-moon-silver/20 text-moon-silver rounded opacity-40 cursor-not-allowed hover:border-hunt-crimson hover:text-hunt-crimson transition-colors flex items-center justify-center" title="LOCK">
+<span class="material-symbols-outlined text-xl">lock</span>
 </button>
-<span class="font-label text-[10px] tracking-widest text-moon-silver/40 ml-1">TAP / DRAG THE FEED TO CONTROL THE PHONE</span>
+<button onclick="toggleFlip()" id="liveFlipBtn" disabled class="aspect-square bg-void-black border border-moon-silver/20 text-moon-silver rounded opacity-40 cursor-not-allowed hover:border-pyrenees-frost hover:text-pyrenees-frost transition-colors flex items-center justify-center" title="Flip camera">
+<span class="material-symbols-outlined text-xl">flip_camera_android</span>
+</button>
+<button onclick="togglePip()" id="pipBtn" disabled class="aspect-square bg-void-black border border-moon-silver/20 text-moon-silver rounded opacity-40 cursor-not-allowed hover:border-maquis-green hover:text-maquis-green transition-colors flex items-center justify-center" title="Toggle camera feed">
+<span class="material-symbols-outlined text-xl">videocam</span>
+</button>
+<button onclick="toggleMicAudio()" id="micAudioBtn" disabled class="aspect-square bg-void-black border border-moon-silver/20 text-moon-silver rounded opacity-40 cursor-not-allowed hover:border-maquis-green hover:text-maquis-green transition-colors flex items-center justify-center" title="Toggle audio">
+<span class="material-symbols-outlined text-xl">volume_up</span>
+</button>
+<button onclick="toggleRecord()" id="liveRecBtn" disabled class="aspect-square bg-void-black border border-moon-silver/20 text-hunt-crimson/80 rounded opacity-40 cursor-not-allowed hover:border-hunt-crimson hover:text-hunt-crimson transition-colors flex items-center justify-center" title="Triple record">
+<span class="material-symbols-outlined text-xl">fiber_manual_record</span>
+</button>
+</div>
+<!-- START / STOP spans the full control column -->
+<button onclick="toggleLiveView()" id="liveBtn" class="w-full px-4 py-3 bg-hunt-crimson/10 border border-hunt-crimson/50 text-hunt-crimson font-label text-sm font-bold tracking-widest rounded hover:bg-hunt-crimson hover:text-white transition-all flex items-center justify-center gap-2">
+<span class="material-symbols-outlined text-lg">play_arrow</span>
+<span>START LIVE VIEW</span>
+</button>
+<p class="font-label text-[10px] tracking-widest text-moon-silver/40 text-center leading-relaxed">TAP / DRAG THE SCREEN FEED TO CONTROL THE PHONE</p>
+</div>
 </div>
 <!-- RECORDINGS (v2.3.3): three media folders, PLAY per file -->
 <div class="mt-4" id="recordingsSection">

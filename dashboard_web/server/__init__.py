@@ -23,6 +23,34 @@ from .device_client import (
     record_start, record_stop, record_status, record_list, record_file,
 )
 from .device_manager import registry
+from .speech_dsp import process_mic_frame
+
+# --- LIVE ws frame post-processing ------------------------------------------
+# The phone relays screen/camera JPEG + PCM mic over ONE ws. Binary frame:
+#   [1B channel][4B BE length][payload]; ch 1=screen, 2=rear, 3=front, 4=PCM mic.
+# ch-4 PCM runs the pure-stdlib speech post-processor (noise reduction + speech
+# focus) before it reaches the browser, so the phone stays stateless and the
+# "heavy lifting" happens on this host (matches the offload plan).
+def _process_live_frame(frame: bytes) -> bytes:
+    if len(frame) < 5:
+        return frame
+    ch = frame[0]
+    ln = int.from_bytes(frame[1:5], "big")
+    if ch != 4 or 5 + ln > len(frame):
+        return frame
+    payload = frame[5:5 + ln]
+    out = process_mic_frame(payload)
+    if out is payload:
+        return frame
+    # Rebuild the 4-byte length header (could change after gain/gate processing).
+    try:
+        nf = bytearray(5 + len(out))
+        nf[0] = 4
+        nf[1:5] = len(out).to_bytes(4, "big")
+        nf[5:] = out
+        return bytes(nf)
+    except Exception:
+        return frame
 
 # ---------- App ----------
 
@@ -571,7 +599,7 @@ async def device_ws_live(ws: WebSocket, host: str, port: int):
         try:
             async for msg in phone:
                 if isinstance(msg, (bytes, bytearray)):
-                    await ws.send_bytes(bytes(msg))
+                    await ws.send_bytes(_process_live_frame(bytes(msg)))
                 elif isinstance(msg, str):
                     await ws.send_text(msg)
         except Exception:

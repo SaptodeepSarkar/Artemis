@@ -634,6 +634,7 @@ function setLiveBtn(enabled) {
         b.classList.toggle("cursor-not-allowed", !enabled);
     });
     updateFlipLabel();
+    setLiveVolumeUI(enabled);
 }
 
 // Map a pointer event on the (object-fit: contain) feed canvas to device
@@ -787,19 +788,49 @@ function handleWsText(raw) {
 // ---- mic audio playback (PCM16 mono 44.1kHz) over WebSocket ----
 const AUDIO_RATE = 44100;
 const AUDIO_CHUNK = 4096;
+// Prime the playout buffer before connecting the ScriptProcessor. The WS
+// delivers mic PCM in bursts (the server drains audio inside its loop, which
+// also blocks on up-to-125ms JPEG captures). Without a pre-roll the consumer
+// fires while the queue is empty → ~ms gaps / pops on every burst. Holding
+// enough pre-roll absorbs jitter so audio never under-runs.
+const AUDIO_PRE_ROLL = AUDIO_RATE * 0.25; // 250ms
 let liveAudioCtx = null;
 let liveAudioNode = null;
+let liveAudioGain = null;
+let liveVolume = 70;
+let liveAudioPrimed = false;
+let liveAudioPriming = false;
 const liveAudioQueue = [];
 
 function pushLiveAudio(samples) {
-    if (!liveAudioCtx || !liveAudioNode) return;
+    if (!liveAudioCtx) return;
+    liveAudioQueue.push(samples);
+    // Cap total latency to ~1.5s, dropping the OLDEST chunks first.
+    const MAX_QUEUE = AUDIO_RATE * 1.5;
     let total = 0;
     for (const c of liveAudioQueue) total += c.length;
-    while (total + samples.length > AUDIO_RATE * 1.5 && liveAudioQueue.length) {
+    while (total > MAX_QUEUE && liveAudioQueue.length > 1) {
         total -= liveAudioQueue[0].length;
         liveAudioQueue.shift();
     }
-    liveAudioQueue.push(samples);
+    // Once enough audio has accumulated, connect the sink to the destination.
+    if (!liveAudioPrimed && !liveAudioPriming) {
+        let queued = 0;
+        for (const c of liveAudioQueue) queued += c.length;
+        if (queued >= AUDIO_PRE_ROLL) {
+            liveAudioPriming = true;
+            setTimeout(() => {
+                try {
+                    if (liveAudioCtx && liveAudioNode && liveAudioNode.context) {
+                        if (liveAudioCtx.state === "suspended") liveAudioCtx.resume();
+                        liveAudioNode.connect(liveAudioGain);
+                    }
+                } catch (e) {}
+                liveAudioPrimed = true;
+                liveAudioPriming = false;
+            }, 0);
+        }
+    }
 }
 
 function startMicAudio() {
@@ -807,27 +838,75 @@ function startMicAudio() {
     const AC = window.AudioContext || window.webkitAudioContext;
     if (!AC) return;
     liveAudioCtx = new AC();
+    liveAudioPrimed = false;
+    liveAudioPriming = false;
+    liveAudioGain = liveAudioCtx.createGain();
+    liveAudioGain.gain.value = liveVolume / 100;
+    liveAudioGain.connect(liveAudioCtx.destination);
+    // ScriptProcessor in pull mode (0 input channels) — output only.
     const sp = liveAudioCtx.createScriptProcessor(AUDIO_CHUNK, 0, 1);
     sp.onaudioprocess = (e) => {
         const out = e.outputBuffer.getChannelData(0);
         let written = 0;
+        // Last non-silent sample held across drains: on a transient
+        // underrun we fill with a small decaying tail instead of an abrupt
+        // zero "click". Idle (no audio at all) still produces silence.
+        let hold = 0;
         while (written < AUDIO_CHUNK && liveAudioQueue.length) {
             const chunk = liveAudioQueue[0];
             const n = Math.min(AUDIO_CHUNK - written, chunk.length);
-            out.set(chunk.subarray(0, n), written);
+            for (let i = 0; i < n; i++) { const v = chunk[i]; out[written + i] = v; hold = v; }
             written += n;
             if (n < chunk.length) liveAudioQueue[0] = chunk.subarray(n);
             else liveAudioQueue.shift();
         }
+        // Under-run past the buffer: decay from the hold sample to silence so
+        // the momentary jitter gap is a soft fade, not a hard cut.
+        if (written > 0 && written < AUDIO_CHUNK) {
+            const tail = AUDIO_CHUNK - written;
+            let amp = 1;
+            for (let i = 0; i < tail; i++) {
+                amp *= 0.75;
+                out[written + i] = hold * amp;
+            }
+        } else if (written === 0) {
+            out.fill(0);
+        }
     };
-    sp.connect(liveAudioCtx.destination);
     liveAudioNode = sp;
+    // ScriptProcessor is NOT connected to the destination yet — pushLiveAudio()
+    // connects it only after a pre-roll accumulates (see AUDIO_PRE_ROLL), so the
+    // cold consumer never fires on an empty queue.
 }
 
 function stopMicAudio() {
     if (liveAudioNode) { try { liveAudioNode.disconnect(); } catch (e) {} liveAudioNode = null; }
+    if (liveAudioGain) { try { liveAudioGain.disconnect(); } catch (e) {} liveAudioGain = null; }
     if (liveAudioCtx) { try { liveAudioCtx.close(); } catch (e) {} liveAudioCtx = null; }
+    liveAudioNode = null;
+    liveAudioPrimed = false;
+    liveAudioPriming = false;
     liveAudioQueue.length = 0;
+}
+
+function setLiveVolume(val) {
+    liveVolume = Math.max(0, Math.min(100, parseInt(val, 10) || 0));
+    if (liveAudioCtx && liveAudioGain) {
+        liveAudioGain.gain.setValueAtTime(liveVolume / 100, liveAudioCtx.currentTime);
+    }
+    const pct = document.getElementById("liveVolPct");
+    if (pct) pct.textContent = liveVolume;
+    // Also drive the device's in-app volume via the WS when live (best-effort).
+    if (liveWs && liveWs.readyState === WebSocket.OPEN) {
+        try { liveWs.send(JSON.stringify({ cmd: "volume", v: liveVolume })); } catch (e) {}
+    }
+}
+
+function setLiveVolumeUI(enabled) {
+    const s = document.getElementById("liveVolSlider");
+    const w = document.getElementById("liveVolWrap");
+    if (s) { s.disabled = !enabled; s.value = liveVolume; }
+    if (w) w.classList.toggle("opacity-40", !enabled);
 }
 
 function toggleMicAudio() {

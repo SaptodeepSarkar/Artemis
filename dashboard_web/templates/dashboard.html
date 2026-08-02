@@ -196,14 +196,20 @@
 <span id="liveStatus" class="font-label text-[10px] tracking-widest text-maquis-green bg-void-black/60 border border-maquis-green/30 px-2 py-0.5 rounded ml-2">IDLE</span>
 </h3>
 </div>
-<div class="relative bg-void-black border border-moon-silver/10 rounded overflow-hidden" style="aspect-ratio: 9/16; max-height: 72vh; margin: 0 auto; width: 100%; max-width: 480px;">
-<canvas id="liveMain" alt="Live phone screen" class="absolute inset-0 w-full h-full object-contain" style="display:none"></canvas>
+<!-- Phone screen feed — fits the phone's portrait width (no height clamp) -->
+<div id="liveScreenCard" class="relative bg-void-black border border-moon-silver/10 rounded overflow-hidden" style="width: 100%; max-width: 480px; aspect-ratio: 9/16; margin: 0 auto;">
+<canvas id="liveMain" alt="Live phone screen — tap/drag to remote-control" class="absolute inset-0 w-full h-full object-contain" style="display:none"></canvas>
 <div id="livePlaceholder" class="absolute inset-0 flex flex-col items-center justify-center gap-3 text-moon-silver/40">
 <span class="material-symbols-outlined text-5xl">videocam_off</span>
 <span class="font-label text-xs tracking-widest">STREAM_IDLE — TAP START</span>
 </div>
-<!-- Camera PiP window (top-right): shows rear/front camera over the screen feed -->
-<div id="livePipWrap" class="absolute top-2 right-2 z-20 hidden" style="width: 32%; aspect-ratio: 9/16; max-width: 150px;">
+<!-- RECORDING pulse indicator -->
+<div id="recIndicator" class="absolute top-2 left-2 z-20 hidden items-center gap-2 bg-void-black/80 border border-hunt-crimson/60 text-hunt-crimson font-label text-xs font-bold tracking-widest px-3 py-1.5 rounded-full">
+<span class="w-2.5 h-2.5 rounded-full bg-hunt-crimson animate-pulse"></span>REC
+</div>
+</div>
+<!-- Camera PiP strip — its own row BELOW the screen so it never blocks the feed -->
+<div id="livePipWrap" class="hidden" style="width: 180px; aspect-ratio: 9/16; margin: 12px auto 0;">
 <div class="relative w-full h-full bg-black border border-pyrenees-frost/50 rounded overflow-hidden shadow-[0_0_16px_rgba(123,164,200,0.3)]">
 <canvas id="livePip" class="w-full h-full object-contain"></canvas>
 <span id="livePipLabel" class="absolute bottom-1 left-1 bg-void-black/80 border border-moon-silver/30 text-moon-silver font-label text-[9px] tracking-widest px-1.5 py-0.5 rounded z-10">REAR</span>
@@ -216,11 +222,6 @@
 <button onclick="closeRecordPip()" class="absolute top-1 right-1 bg-void-black/80 border border-moon-silver/30 text-moon-silver rounded-full w-7 h-7 flex items-center justify-center hover:text-hunt-crimson hover:border-hunt-crimson transition-colors z-10" title="Close player">
 <span class="material-symbols-outlined text-sm">close</span>
 </button>
-</div>
-</div>
-<!-- RECORDING pulse indicator -->
-<div id="recIndicator" class="absolute top-2 left-2 z-20 hidden items-center gap-2 bg-void-black/80 border border-hunt-crimson/60 text-hunt-crimson font-label text-xs font-bold tracking-widest px-3 py-1.5 rounded-full">
-<span class="w-2.5 h-2.5 rounded-full bg-hunt-crimson animate-pulse"></span>REC
 </div>
 </div>
 <div class="mt-4 flex flex-wrap items-center justify-center gap-3">
@@ -237,7 +238,7 @@
                                 CAM: REAR
                             </button>
 <button onclick="togglePip()" id="pipBtn" disabled class="px-4 py-3 bg-void-black border border-moon-silver/20 text-moon-silver font-label text-xs font-bold tracking-widest rounded opacity-40 cursor-not-allowed flex items-center justify-center gap-2">
-<span class="material-symbols-outlined text-sm">front_camera</span>
+<span class="material-symbols-outlined text-sm">camera_front</span>
                                 CAM PIP: ON
                             </button>
 <button onclick="toggleMicAudio()" id="micAudioBtn" disabled class="px-4 py-3 bg-void-black border border-moon-silver/20 text-moon-silver font-label text-xs font-bold tracking-widest rounded opacity-40 cursor-not-allowed flex items-center justify-center gap-2">

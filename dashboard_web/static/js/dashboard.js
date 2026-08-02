@@ -479,9 +479,8 @@ async function toggleLiveView() {
         liveWs.onopen = () => {
             main.style.display = "block";
             if (place) place.style.display = "none";
-            // Show the camera PiP window (main view is the screen).
-            const wrap = document.getElementById("livePipWrap");
-            if (wrap) wrap.style.display = "block";
+            // Show the camera PiP window only if the user left CAM PIP on.
+            applyPipDisplay();
             btn.innerHTML = '<span class="material-symbols-outlined text-lg">stop</span> STOP LIVE VIEW';
             btn.classList.remove("bg-hunt-crimson/10", "border-hunt-crimson/50", "text-hunt-crimson");
             btn.classList.add("bg-hunt-crimson", "text-white", "border-hunt-crimson");
@@ -563,9 +562,8 @@ function toggleLiveSource() {
         sendWs({ cmd: "camera", v: liveLens });
         if (status) status.innerHTML = liveStatusHtml();
     }
-    // In cam-only mode the camera fills the main canvas; hide the PiP.
-    const wrap = document.getElementById("livePipWrap");
-    if (wrap) wrap.style.display = liveSource === "cam" ? "none" : "block";
+    // CAM-only mode hides the PiP; screen mode shows it iff the user toggled it on.
+    applyPipDisplay();
     const srcBtn = document.getElementById("liveSourceBtn");
     if (srcBtn) srcBtn.innerHTML = `<span class="material-symbols-outlined text-sm">${liveSource === "screen" ? "screen_share" : "photo_camera"}</span> ${liveSource.toUpperCase()}`;
 }
@@ -580,17 +578,16 @@ function toggleFlip() {
 
 function togglePip() {
     pipOn = !pipOn;
-    const wrap = document.getElementById("livePipWrap");
     const btn = document.getElementById("pipBtn");
-    if (pipOn) {
-        if (wrap) wrap.style.display = "block";
-        if (btn) btn.innerHTML = '<span class="material-symbols-outlined text-sm">front_camera</span> CAM PIP: ON';
-        if (liveWs && liveWs.readyState === WebSocket.OPEN) sendWs({ cmd: "pip", v: "on" });
-    } else {
-        if (wrap) wrap.style.display = "none";
-        if (btn) btn.innerHTML = '<span class="material-symbols-outlined text-sm">front_camera</span> CAM PIP: OFF';
-        if (liveWs && liveWs.readyState === WebSocket.OPEN) sendWs({ cmd: "pip", v: "off" });
-    }
+    applyPipDisplay();
+    if (btn) btn.innerHTML = `<span class="material-symbols-outlined text-sm">camera_front</span> CAM PIP: ${pipOn ? "ON" : "OFF"}`;
+    if (liveWs && liveWs.readyState === WebSocket.OPEN) sendWs({ cmd: "pip", v: pipOn ? "on" : "off" });
+}
+
+// The camera PiP is only ever shown in screen view AND when the user toggled it on.
+function applyPipDisplay() {
+    const wrap = document.getElementById("livePipWrap");
+    if (wrap) wrap.style.display = liveSource === "screen" && pipOn ? "block" : "none";
 }
 
 // ---- v2.3.3: remote-admin control (tap/swipe/buttons), triple RECORD, PiP PLAY ----

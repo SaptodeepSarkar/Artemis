@@ -511,3 +511,101 @@ async def ws_live(host: str, token: str, port: int = 8443,
         await ws.close()
         raise RuntimeError(f"ws_tls: {e}")
     return ws
+
+
+# ---------------------------------------------------------------------------
+# v2.3.3 — remote-admin control: accessibility input + triple RECORD
+# ---------------------------------------------------------------------------
+
+def control_tap(host: str, token: str, x: float, y: float, port: int = 8443,
+                cert_fp: str | None = None) -> tuple[dict, str]:
+    """POST /api/v1/control/tap — tap at screen px (accessibility gesture)."""
+    _, j, pin = _http_request(
+        host, "POST", "/api/v1/control/tap",
+        body={"x": x, "y": y}, token=token, port=port, cert_fp=cert_fp,
+    )
+    return j, pin
+
+
+def control_longpress(host: str, token: str, x: float, y: float, port: int = 8443,
+                      cert_fp: str | None = None) -> tuple[dict, str]:
+    """POST /api/v1/control/longpress — long-press at screen px."""
+    _, j, pin = _http_request(
+        host, "POST", "/api/v1/control/longpress",
+        body={"x": x, "y": y}, token=token, port=port, cert_fp=cert_fp,
+    )
+    return j, pin
+
+
+def control_swipe(host: str, token: str, x1: float, y1: float, x2: float, y2: float,
+                  duration_ms: int | None = None, port: int = 8443,
+                  cert_fp: str | None = None) -> tuple[dict, str]:
+    """POST /api/v1/control/swipe — drag from (x1,y1) to (x2,y2) in ms."""
+    body: dict = {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
+    if duration_ms is not None:
+        body["durationMs"] = duration_ms
+    _, j, pin = _http_request(
+        host, "POST", "/api/v1/control/swipe",
+        body=body, token=token, port=port, cert_fp=cert_fp,
+    )
+    return j, pin
+
+
+def control_action(host: str, token: str, action: str, port: int = 8443,
+                   cert_fp: str | None = None) -> tuple[dict, str]:
+    """POST /api/v1/control/action — system action: home|back|recents|lock|
+    notifications|quick_settings|power."""
+    _, j, pin = _http_request(
+        host, "POST", "/api/v1/control/action",
+        body={"action": action}, token=token, port=port, cert_fp=cert_fp,
+    )
+    return j, pin
+
+
+def record_start(host: str, token: str, lens: str = "back", port: int = 8443,
+                 cert_fp: str | None = None) -> tuple[dict, str]:
+    """POST /api/v1/record/start — start screen+front+rear RECORD."""
+    _, j, pin = _http_request(
+        host, "POST", "/api/v1/record/start",
+        body={"lens": lens}, token=token, port=port, timeout=15.0, cert_fp=cert_fp,
+    )
+    return j, pin
+
+
+def record_stop(host: str, token: str, port: int = 8443,
+                cert_fp: str | None = None) -> tuple[dict, str]:
+    """POST /api/v1/record/stop — stop RECORD, finalize the three MP4s."""
+    _, j, pin = _http_request(
+        host, "POST", "/api/v1/record/stop",
+        token=token, port=port, timeout=30.0, cert_fp=cert_fp,
+    )
+    return j, pin
+
+
+def record_status(host: str, token: str, port: int = 8443,
+                  cert_fp: str | None = None) -> tuple[dict, str]:
+    """GET /api/v1/record/status — recording flag, startedAt, active lenses."""
+    _, j, pin = _http_request(
+        host, "GET", "/api/v1/record/status",
+        token=token, port=port, cert_fp=cert_fp,
+    )
+    return j, pin
+
+
+def record_list(host: str, token: str, port: int = 8443,
+                cert_fp: str | None = None) -> tuple[dict, str]:
+    """GET /api/v1/record/list — {screen:[...],front:[...],rear:[...]} files."""
+    _, j, pin = _http_request(
+        host, "GET", "/api/v1/record/list",
+        token=token, port=port, cert_fp=cert_fp,
+    )
+    return j, pin
+
+
+def record_file(host: str, token: str, media: str, rec_id: str, port: int = 8443,
+                cert_fp: str | None = None) -> tuple[int, bytes, str]:
+    """GET /api/v1/record/{media}/{id}/file — binary MP4 download."""
+    return _http_download(
+        host, f"/api/v1/record/{media}/{rec_id}/file",
+        token=token, port=port, timeout=120.0, cert_fp=cert_fp,
+    )

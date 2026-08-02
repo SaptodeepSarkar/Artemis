@@ -1,9 +1,13 @@
 # Artemis Sentinel — AGENTS.md
 
-> Current: **v2.3.2** (2026-08-01). Read this first, then `docs/SECURITY.md`
+> Current: **v2.3.3** (2026-08-02). Read this first, then `docs/SECURITY.md`
 > (threat model), then `docs/handoff.md` (the current phase brief for the
 > next agent). This file is the durable project reference; the phase brief
-> lives in `handoff.md`.
+> lives in `handoff.md`. The other files that once lived here (PRD.md,
+> PROJECT.md, SYSTEM.md, TASKS.md, MEMORY.md, and the research/design docs)
+> were removed — they described an aspirational Ktor/SQLCipher/JWT/WebRTC
+> build that this codebase never used. This document (plus SECURITY.md and
+> handoff.md) is the single source of truth going forward.
 
 ---
 
@@ -22,7 +26,13 @@ The phone server is the heart: every capability (location, camera, mic,
 call logs, SMS, video, admin lock) is an authenticated HTTP endpoint on
 `:8443` behind the TLS + TOFU-pin client stack.
 
-## 2. Current state (v2.3.2 — shipped, live-verified)
+## 2. Current state (v2.3.3 — built, in the working tree, not yet committed/released)
+
+> §2.1–§2.8 below were shipped and live-verified through v2.3.2. §2.9
+> (remote-admin control + triple RECORD + PiP PLAY) is fully implemented in
+> the working tree (versionName/versionCode 2.3.3/8) and validated by
+> build+smoke tests, but is **not yet committed or pushed** — see
+> `docs/handoff.md` §4 for the delivery record.
 
 ### 2.1 The security backbone (DONE, FROZEN — do not touch)
 
@@ -59,6 +69,8 @@ call logs, SMS, video, admin lock) is an authenticated HTTP endpoint on
 | `/api/v1/battery` (BatteryHelper — dashboard header) | ✓ |
 | `/api/v1/screen/status`, `/screen/capture` (accessibility-first) | ✓ |
 | `/api/v1/stream/screen`, `/stream/camera`, `/stream/mic` (MJPEG/PCM live) | ✓ legacy — LIVE VIEW now uses WS (2.7) |
+| `/api/v1/control/tap`, `/control/longpress`, `/control/swipe`, `/control/action` (accessibility input) | ✓ v2.3.3 — see 2.9 |
+| `/api/v1/record/start`, `/stop`, `/status`, `/list`, `/record/{media}/{id}/file` (triple RECORD) | ✓ v2.3.3 — see 2.9 |
 | `/api/v1/files/list`, `/download`, `/upload` (app-scoped root) | ✓ |
 | `/api/v1/contacts` (READ_CONTACTS) | ✓ |
 | `/api/v1/camera/feed/start`, `/stop`, `/latest` | ✓ |
@@ -218,6 +230,50 @@ favicon (`/static/favicon.svg`, hardcoded path — `url_for('static')` raises
   served from disk) — but the browser caches `dashboard.js`, so verify
   with cache-busted URLs (`?x=N`).
 
+### 2.9 v2.3.3 — remote-admin control + triple RECORD + PiP PLAY
+
+The remote-administrator control phase from the old handoff is **built and
+in the working tree** (versionName/versionCode 2.3.3/8). It adds three
+things, all FGS-only with **zero new consent** (the M51 accessibility
+service is already enabled):
+
+- **Screen / input control.** `feature/RemoteInputController.kt` is a Thin
+  facade over `RemoteControlService` (accessibility `dispatchGesture` +
+  `performGlobalAction`) exposing `tap`, `longPress`, `swipe`, `global`.
+  HTTP: `POST /api/v1/control/tap|longpress|swipe|action` (JSON body;
+  returns 409 `accessibility_disabled` if the service isn't connected).
+  WS: the same commands ride the LIVE VIEW socket as
+  `{"cmd":"input","action":"tap|swipe|global",...}`; the dashboard's
+  control pad (HOME / BACK / RECENTS / LOCK) plus tap-on-canvas and
+  drag-to-swipe (canvas coords mapped to device px on the 1080×2400 feed).
+- **One-button triple RECORD.** `feature/TripleRecorder.kt` records the
+  SCREEN, FRONT cam and REAR cam at once into three MP4s under
+  `<filesDir>/data/record/{screen,front,rear}/rec_<epochMs>.mp4`.
+  - Screen uses the SAME accessibility `RemoteControlService.capture()`
+    `takeScreenshot` loop (≈2–3 fps, downscaled to ≤960 px wide, drawn to
+    the encoder input surface).
+  - Cameras use `CameraController.recordSink` (the live preview's
+    analyzer feeds NV21 frames per lens) + `startSecondPreviewStream` for
+    the off-lens when the device supports concurrent cameras (M51 does).
+    If a second lens is rejected, that folder stays empty (handoff rule).
+  - Endpoints: `POST /api/v1/record/start` (optional `{"lens":"front|back"}`),
+    `/stop` → `{"status":"saved","paths":{screen:[..],front:[..],rear:[..]}}`,
+    `/status`, `/list`, and `GET /api/v1/record/{media}/{id}/file`
+    (binary MP4). WS path: `{"cmd":"record","v":"on|off"}` rides the LIVE
+    VIEW socket; the phone pushes `{"event":"record_saved"}`/`record_status`
+    text frames back.
+  - `onPreviewLensChanged` re-tracks the second bind when the user FLIPs
+    mid-recording so each MP4 keeps its own lens's frames.
+- **PiP PLAY.** The dashboard `recordingsSection` lists the three folders
+  from `/record/list`; each file's PLAY opens `recordPipVideo` (top-right
+  overlay) streaming the authenticated `/record/{media}/{id}/file`.
+
+Also in this phase (small fixes, unrelated to the control work): remote
+input helpers never hold an Activity, and the artifact-only `RemoteInput`
+service wiring is FGS-only. No build-dependency additions beyond what the
+STACK already had — `TripleRecorder` uses raw `MediaCodec`/`MediaMuxer`,
+`RemoteInputController` is pure Android framework. `versionCode` bumped 7→8.
+
 ## 3. Architecture and conventions
 
 ### 3.1 Phone server pattern (`Artiest/.../server/SimpleHttpServer.kt`)
@@ -244,15 +300,18 @@ One provider class per capability: `LocationTracker`, `CameraController`,
 `MicController`, `CallRecorder`, `VideoRecorder`, `CallLogsProvider`,
 `SmsProvider`, `DeviceInfoProvider`, `RemoteControlService`,
 `CameraFeedController`, `ScreenCaptureController`, `FileSystemHelper`,
-`ContactsProvider`, `BatteryHelper`. Handlers in
+`ContactsProvider`, `BatteryHelper`, `RemoteInputController` (tap/swipe/
+long-press/global action facade), `TripleRecorder` (simultaneous screen +
+front + rear camera MP4 capture). Handlers in
 `SimpleHttpServer` call these. Permissions go through
 `permissions/PermissionManager.kt`.
 
-### 3.3 The next phase (helpers)
+### 3.3 The next phase
 
-See `docs/handoff.md` — build server-callable helpers (location, camera
-feed, screen, files/assets) that the server can invoke **even when the app
-UI is not open** (FGS-only, no Activity dependency).
+See `docs/handoff.md`. The v2.3.3 remote-admin control phase is built and
+sitting in the working tree, uncommitted; the immediate next step is to
+deliver it (`commit + push v2.3.3`) once smoke-verified, then follow the
+brief there for what comes after.
 
 ## 4. Environment & build
 
@@ -299,6 +358,16 @@ UI is not open** (FGS-only, no Activity dependency).
 
 ## 6. Version history
 
+- **v2.3.3** (built, working tree) — remote-admin control: accessibility
+  tap/swipe/long-press/global-action input over HTTP + WS, one-button triple
+  RECORD (screen + front + rear → `data/record/{screen,front,rear}`), PiP
+  PLAY of recordings. `versionCode` 8. Not yet committed.
+- **v2.3.2** (`406585c`, tag `v2.3.2`) — dashboard UX: auto-location on
+  open, camera-only LIVE VIEW (SCREEN toggle + status overlay + PiP
+  removed, FLIP always works), SMS delete button removed (Android-blocked).
+- **v2.3.1** (`d7e8f21`) — LIVE VIEW WebSocket pipeline: RFC 6455 frame
+  fix (64-bit length for >64KiB screen JPEGs), canvas+WebAudio client,
+  flip, no-default-app (SET DEFAULT card removed).
 - **v2.3.0** — helpers phase + video-call: consent-free accessibility
   screen capture, MJPEG screen/camera streams + PCM mic stream, LIVE
   VIEW dashboard panel (PiP front cam, audio toggle), SMS/call-log

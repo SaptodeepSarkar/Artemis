@@ -15,8 +15,12 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SYSTEM_EXEMPTED" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+
+    <!-- Required as one of the "anyOf" permissions for connectedDevice FGS type (Android 14+) -->
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
 
     <!-- Full file access (optional: "All files access" Settings grant, or
          legacy READ_EXTERNAL_STORAGE on API 29) for the files helper -->
@@ -98,7 +102,7 @@
         <service
             android:name=".service.ArtemisSentinelService"
             android:exported="true"
-            android:foregroundServiceType="dataSync|camera|microphone|location|mediaPlayback|connectedDevice"
+            android:foregroundServiceType="dataSync|location"
             android:stopWithTask="false" />
 
         <!-- Screen capture consent holder: MediaProjection must be adopted by

@@ -7,7 +7,6 @@ local.properties
 # Android
 Artiest/.cxx/
 Artiest/build/
-*.apk
 *.aab
 *.ap_
 *.dex
@@ -15,10 +14,15 @@ Artiest/build/
 bin/
 gen/
 out/
+.externalNativeBuild
+captures/
 
 # Python
 __pycache__/
 *.pyc
+*.pyo
+.venv/
+venv/
 
 # IDE
 .idea/
@@ -30,6 +34,9 @@ __pycache__/
 .project
 .classpath
 *~
+workspace.xml
+navEditor.xml
+assetWizardSettings.xml
 
 # OS
 .DS_Store
@@ -43,5 +50,12 @@ Thumbs.db
 *.tmp
 *.swp
 *.swo
-*~
 *.local
+artemis_logs.txt
+
+# Local secrets — never commit
+*.key
+*.pem
+
+# Graphify knowledge-graph output (generated; rebuild via `graphify extract . --code-only`)
+graphify-out/

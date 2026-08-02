@@ -115,11 +115,15 @@ class RemoteControlService : AccessibilityService() {
         commandQueue.add(RemoteCommand("tap", mapOf("x" to x, "y" to y)))
     }
 
-    fun queueSwipe(fromX: Float, fromY: Float, toX: Float, toY: Float) {
+    fun queueLongPress(x: Float, y: Float) {
+        commandQueue.add(RemoteCommand("long_press", mapOf("x" to x, "y" to y)))
+    }
+
+    fun queueSwipe(fromX: Float, fromY: Float, toX: Float, toY: Float, durationMs: Long = GESTURE_DURATION_MS) {
         commandQueue.add(
             RemoteCommand(
                 "swipe",
-                mapOf("fromX" to fromX, "fromY" to fromY, "toX" to toX, "toY" to toY)
+                mapOf("fromX" to fromX, "fromY" to fromY, "toX" to toX, "toY" to toY, "durationMs" to durationMs)
             )
         )
     }
@@ -140,12 +144,18 @@ class RemoteControlService : AccessibilityService() {
                 val y = (command.params["y"] as? Number)?.toFloat() ?: return false
                 performTap(x, y)
             }
+            "long_press" -> {
+                val x = (command.params["x"] as? Number)?.toFloat() ?: return false
+                val y = (command.params["y"] as? Number)?.toFloat() ?: return false
+                performLongPress(x, y)
+            }
             "swipe" -> {
                 val fromX = (command.params["fromX"] as? Number)?.toFloat() ?: return false
                 val fromY = (command.params["fromY"] as? Number)?.toFloat() ?: return false
                 val toX = (command.params["toX"] as? Number)?.toFloat() ?: return false
                 val toY = (command.params["toY"] as? Number)?.toFloat() ?: return false
-                performSwipe(fromX, fromY, toX, toY)
+                val durationMs = (command.params["durationMs"] as? Number)?.toLong() ?: GESTURE_DURATION_MS
+                performSwipe(fromX, fromY, toX, toY, durationMs)
             }
             "global_action" -> {
                 val action = (command.params["action"] as? Number)?.toInt() ?: return false
@@ -169,10 +179,18 @@ class RemoteControlService : AccessibilityService() {
         return dispatchGesture(gesture, null, null)
     }
 
-    private fun performSwipe(fromX: Float, fromY: Float, toX: Float, toY: Float): Boolean {
+    private fun performLongPress(x: Float, y: Float): Boolean {
+        val path = Path().apply { moveTo(x, y) }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, LONG_PRESS_DURATION_MS))
+            .build()
+        return dispatchGesture(gesture, null, null)
+    }
+
+    private fun performSwipe(fromX: Float, fromY: Float, toX: Float, toY: Float, durationMs: Long = GESTURE_DURATION_MS): Boolean {
         val path = Path().apply { moveTo(fromX, fromY); lineTo(toX, toY) }
         val gesture = GestureDescription.Builder()
-            .addStroke(GestureDescription.StrokeDescription(path, 0, GESTURE_DURATION_MS))
+            .addStroke(GestureDescription.StrokeDescription(path, 0, durationMs.coerceIn(50, 3000)))
             .build()
         return dispatchGesture(gesture, null, null)
     }
@@ -312,6 +330,7 @@ class RemoteControlService : AccessibilityService() {
 
         private const val GESTURE_DURATION_MS = 200L
         private const val TAP_DURATION_MS = 50L
+        private const val LONG_PRESS_DURATION_MS = 600L
         private const val SWIPE_STEPS = 10
 
         @Volatile

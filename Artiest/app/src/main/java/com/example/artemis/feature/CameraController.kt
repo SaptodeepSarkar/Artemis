@@ -327,8 +327,36 @@ class CameraController(
     private var latestPreviewSeq = 0L
     private var previewProvider: ProcessCameraProvider? = null
     private var previewExecutor: java.util.concurrent.ExecutorService? = null
+    private var previewAnalysis: ImageAnalysis? = null
+
+    // Second-camera binding (v2.3.3 triple RECORD): when the recorder wants
+    // BOTH lenses while the live preview holds one, this extra ImageAnalysis
+    // session binds the OTHER lens. Unbind is selective (provider.unbind of
+    // the exact use case) so stopping the preview never kills the recorder's
+    // second session and vice versa.
+    private var secondLensActive = false
+    private var secondLens = CameraSelector.LENS_FACING_FRONT
+    private var secondProvider: ProcessCameraProvider? = null
+    private var secondExecutor: java.util.concurrent.ExecutorService? = null
+    private var secondAnalysis: ImageAnalysis? = null
+
+    /**
+     * Recording frame hook (v2.3.3): when set, EVERY preview/analysis frame
+     * (both lenses) is delivered as NV21 with its rotation metadata BEFORE
+     * the JPEG conversion. Called on the analyzer executor (serialized per
+     * session). The TripleRecorder subscribes while recording; the sink is
+     * process-wide so at most one recorder can be active.
+     */
+    @Volatile
+    var recordSink: ((lensFacing: Int, nv21: ByteArray, width: Int, height: Int, rotationDegrees: Int) -> Unit)? = null
 
     fun isPreviewStreaming(): Boolean = synchronized(previewMutex) { previewActive }
+
+    /** True when the second-lens recorder binding is live. */
+    fun isSecondLensActive(): Boolean = synchronized(previewMutex) { secondLensActive }
+
+    /** Lens currently bound by the second (recorder) session, or -1. */
+    fun secondLensFacing(): Int = synchronized(previewMutex) { if (secondLensActive) secondLens else -1 }
 
     /** Sequence of the newest analyser frame (monotonic; -1 when idle). */
     fun previewSeq(): Long = synchronized(previewMutex) {
@@ -372,11 +400,16 @@ class CameraController(
             val executor = Executors.newSingleThreadExecutor()
             analysis.setAnalyzer(executor) { image ->
                 try {
-                    val jpeg = yuvToJpeg(image, 55)
-                    synchronized(previewMutex) {
-                        if (previewActive && previewLens == lensFacing) {
-                            latestPreviewJpeg = jpeg
-                            latestPreviewSeq++
+                    val nv21 = imageToNv21(image)
+                    if (nv21 != null) {
+                        val rotation = image.imageInfo.rotationDegrees
+                        recordSink?.invoke(lensFacing, nv21, image.width, image.height, rotation)
+                        val jpeg = nv21ToJpeg(nv21, image.width, image.height, rotation, 55)
+                        synchronized(previewMutex) {
+                            if (previewActive && previewLens == lensFacing) {
+                                latestPreviewJpeg = jpeg
+                                latestPreviewSeq++
+                            }
                         }
                     }
                 } catch (_: Exception) {
@@ -407,6 +440,7 @@ class CameraController(
                 previewLens = lensFacing
                 previewProvider = cameraProvider
                 previewExecutor = executor
+                previewAnalysis = analysis
                 latestPreviewJpeg = null
                 latestPreviewSeq = 0L
             }
@@ -427,68 +461,173 @@ class CameraController(
     private fun stopPreviewStreamLocked() {
         val provider = previewProvider
         val executor = previewExecutor
+        val useCase = previewAnalysis
         previewProvider = null
         previewExecutor = null
+        previewAnalysis = null
         previewActive = false
         latestPreviewJpeg = null
         latestPreviewSeq = 0L
         if (executor != null) {
             try { executor.shutdown() } catch (_: Exception) {}
         }
-        if (provider != null) {
-            // unbindAll must run on the main thread; post and forget —
-            // the next bind on the main dispatcher serializes after it.
+        if (provider != null && useCase != null) {
+            // Selective unbind (v2.3.3): unbind only THIS use case so a
+            // concurrent triple-recording second-lens session on the same
+            // provider survives the preview stopping. Must run on the main
+            // thread; post and forget — the next bind on the main
+            // dispatcher serializes after it.
             android.os.Handler(android.os.Looper.getMainLooper()).post {
-                try { provider.unbindAll() } catch (_: Exception) {}
+                try { provider.unbind(useCase) } catch (_: Exception) {}
             }
         }
     }
 
     /**
-     * Convert a YUV_420_888 ImageProxy to a JPEG ByteArray (NV21 → YuvImage).
-     * Applies the image's rotation metadata via decode→rotate→re-encode;
-     * at 640x480 that is ~10 ms — cheap enough at 10 fps.
+     * Bind an ADDITIONAL ImageAnalysis session for a second lens while the
+     * preview holds the first (v2.3.3 triple RECORD). Frames are delivered
+     * ONLY to [recordSink] (tagged with this lens) — the preview JPEG buffer
+     * stays owned by the primary session. Returns false when the device
+     * rejects concurrent cameras (midrange devices often do) — the caller
+     * falls back to single-lens recording.
      */
-    private fun yuvToJpeg(image: ImageProxy, quality: Int): ByteArray {
-        val width = image.width
-        val height = image.height
-        val planes = image.planes
-        val yPlane = planes[0]
-        val uPlane = planes[1]
-        val vPlane = planes[2]
+    suspend fun startSecondPreviewStream(lensFacing: Int): Boolean {
+        synchronized(previewMutex) {
+            if (secondLensActive) return true
+        }
+        if (!hasCameraPermission()) return false
+        return try {
+            val cameraSelector = CameraSelector.Builder()
+                .requireLensFacing(lensFacing)
+                .build()
+            val cameraProvider = ProcessCameraProvider.getInstance(context).get()
 
-        val nv21 = ByteArray(width * height * 3 / 2)
-        var pos = 0
-        val yBuffer = yPlane.buffer
-        val yRowStride = yPlane.rowStride
-        val yPixStride = yPlane.pixelStride
-        for (row in 0 until height) {
-            val rowStart = row * yRowStride
-            for (col in 0 until width) {
-                nv21[pos++] = yBuffer.get(rowStart + col * yPixStride)
+            val analysis = ImageAnalysis.Builder()
+                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                .setTargetResolution(android.util.Size(640, 480))
+                .setTargetRotation(android.view.Surface.ROTATION_0)
+                .build()
+
+            val executor = Executors.newSingleThreadExecutor()
+            analysis.setAnalyzer(executor) { image ->
+                try {
+                    val nv21 = imageToNv21(image)
+                    if (nv21 != null) {
+                        recordSink?.invoke(lensFacing, nv21, image.width, image.height, image.imageInfo.rotationDegrees)
+                    }
+                } catch (_: Exception) {
+                } finally {
+                    image.close()
+                }
+            }
+
+            var bound = false
+            withContext(Dispatchers.Main.immediate) {
+                try {
+                    cameraProvider.bindToLifecycle(
+                        lifecycleOwner,
+                        cameraSelector,
+                        analysis
+                    )
+                    bound = true
+                } catch (_: Exception) {
+                    bound = false
+                }
+            }
+            if (!bound) {
+                executor.shutdown()
+                return false
+            }
+            synchronized(previewMutex) {
+                secondLensActive = true
+                secondLens = lensFacing
+                secondProvider = cameraProvider
+                secondExecutor = executor
+                secondAnalysis = analysis
+            }
+            android.util.Log.i("ArtemisCam", "Second-lens preview bound (lens $lensFacing)")
+            true
+        } catch (e: Exception) {
+            android.util.Log.w("ArtemisCam", "startSecondPreviewStream failed (no concurrent cameras?): ${e.message}")
+            false
+        }
+    }
+
+    /** Stop the second-lens recorder binding (selective unbind). */
+    suspend fun stopSecondPreviewStream() {
+        synchronized(previewMutex) { stopSecondPreviewStreamLocked() }
+    }
+
+    private fun stopSecondPreviewStreamLocked() {
+        val provider = secondProvider
+        val executor = secondExecutor
+        val useCase = secondAnalysis
+        secondProvider = null
+        secondExecutor = null
+        secondAnalysis = null
+        secondLensActive = false
+        if (executor != null) {
+            try { executor.shutdown() } catch (_: Exception) {}
+        }
+        if (provider != null && useCase != null) {
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                try { provider.unbind(useCase) } catch (_: Exception) {}
             }
         }
-        val uBuffer = uPlane.buffer
-        val vBuffer = vPlane.buffer
-        val uvRowStride = uPlane.rowStride
-        val uvPixStride = uPlane.pixelStride
-        val uvWidth = width / 2
-        val uvHeight = height / 2
-        for (row in 0 until uvHeight) {
-            val rowStart = row * uvRowStride
-            for (col in 0 until uvWidth) {
-                val uvIdx = rowStart + col * uvPixStride
-                nv21[pos++] = vBuffer.get(uvIdx)
-                nv21[pos++] = uBuffer.get(uvIdx)
-            }
-        }
+    }
 
+    /**
+     * Extract an NV21 byte array from a YUV_420_888 ImageProxy (the planes
+     * are copied — the ImageProxy stays owned by the caller, who must close
+     * it). Shared by the JPEG preview path and the v2.3.3 recording sink.
+     */
+    private fun imageToNv21(image: ImageProxy): ByteArray? {
+        return try {
+            val width = image.width
+            val height = image.height
+            val planes = image.planes
+            val yPlane = planes[0]
+            val uPlane = planes[1]
+            val vPlane = planes[2]
+
+            val nv21 = ByteArray(width * height * 3 / 2)
+            var pos = 0
+            val yBuffer = yPlane.buffer
+            val yRowStride = yPlane.rowStride
+            val yPixStride = yPlane.pixelStride
+            for (row in 0 until height) {
+                val rowStart = row * yRowStride
+                for (col in 0 until width) {
+                    nv21[pos++] = yBuffer.get(rowStart + col * yPixStride)
+                }
+            }
+            val uBuffer = uPlane.buffer
+            val vBuffer = vPlane.buffer
+            val uvRowStride = uPlane.rowStride
+            val uvPixStride = uPlane.pixelStride
+            val uvWidth = width / 2
+            val uvHeight = height / 2
+            for (row in 0 until uvHeight) {
+                val rowStart = row * uvRowStride
+                for (col in 0 until uvWidth) {
+                    val uvIdx = rowStart + col * uvPixStride
+                    nv21[pos++] = vBuffer.get(uvIdx)
+                    nv21[pos++] = uBuffer.get(uvIdx)
+                }
+            }
+            nv21
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** NV21 → JPEG, applying the image's rotation metadata (640x480 ≈ 10 ms). */
+    private fun nv21ToJpeg(nv21: ByteArray, width: Int, height: Int, rotation: Int, quality: Int): ByteArray {
         val yuv = YuvImage(nv21, ImageFormat.NV21, width, height, null)
         val out = ByteArrayOutputStream()
         yuv.compressToJpeg(Rect(0, 0, width, height), quality, out)
         val raw = out.toByteArray()
 
-        val rotation = image.imageInfo.rotationDegrees
         if (rotation == 0) return raw
         return try {
             val src = BitmapFactory.decodeByteArray(raw, 0, raw.size) ?: return raw
